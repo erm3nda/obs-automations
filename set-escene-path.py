@@ -1,12 +1,19 @@
 import obspython as obs
 import os
 import re
+import glob
+import subprocess
 
 # ─── Config defaults ──────────────────────────────────────────────────────────
 base_folder          = ""      # debe configurarse en el plugin antes de funcionar
 keep_recording       = False
 auto_start_recording = False
 auto_start_replay    = False
+
+# Limpieza de grabaciones "en negro"
+enable_cleanup    = False
+cleanup_threshold = 90        # % mínimo de negro para eliminar (0-100)
+ffmpeg_exe        = "ffmpeg"  # ruta a ffmpeg o "ffmpeg" si está en PATH
 
 # Intencion capturada en el momento del cambio de escena
 _want_restart_recording = False
@@ -15,6 +22,9 @@ _want_restart_replay    = False
 # Flags para arrancar TRAS recibir el evento STOPPED (stop es asincrono)
 _pending_start_recording = False
 _pending_start_replay    = False
+
+# Tracking de carpeta activa para cleanup
+_current_recording_folder = None
 
 
 # ─── Script metadata ──────────────────────────────────────────────────────────
@@ -36,7 +46,7 @@ def script_properties():
     )
     obs.obs_properties_add_bool(
         props, "keep_recording",
-        "Mantener grabación activa al cambiar escena (sin interrumpir)"
+        "Mantener grabación activa al cambiar escena"
     )
     obs.obs_properties_add_bool(
         props, "auto_start_recording",
@@ -46,6 +56,23 @@ def script_properties():
         props, "auto_start_replay",
         "Auto-start: iniciar replay buffer al cambiar escena"
     )
+
+    # Sección limpieza
+    obs.obs_properties_add_bool(
+        props, "enable_cleanup",
+        "🗑 Eliminar grabaciones 'en negro'"
+    )
+    obs.obs_properties_add_int_slider(
+        props, "cleanup_threshold",
+        "  % negro para eliminar",
+        50, 100, 1
+    )
+    obs.obs_properties_add_text(
+        props, "ffmpeg_exe",
+        "  Ruta FFmpeg (vacío = PATH)",
+        obs.OBS_TEXT_DEFAULT
+    )
+
     return props
 
 def script_defaults(settings):
@@ -53,14 +80,22 @@ def script_defaults(settings):
     obs.obs_data_set_default_bool(settings, "keep_recording",       False)
     obs.obs_data_set_default_bool(settings, "auto_start_recording", False)
     obs.obs_data_set_default_bool(settings, "auto_start_replay",    False)
+    obs.obs_data_set_default_bool(settings, "enable_cleanup",       False)
+    obs.obs_data_set_default_int(settings,  "cleanup_threshold",    90)
+    obs.obs_data_set_default_string(settings, "ffmpeg_exe",         "ffmpeg")
 
 def script_update(settings):
     global base_folder, keep_recording, auto_start_recording, auto_start_replay
+    global enable_cleanup, cleanup_threshold, ffmpeg_exe
     val = obs.obs_data_get_string(settings, "base_folder")
-    base_folder = val if val else ""
+    base_folder          = val if val else ""
     keep_recording       = obs.obs_data_get_bool(settings, "keep_recording")
     auto_start_recording = obs.obs_data_get_bool(settings, "auto_start_recording")
     auto_start_replay    = obs.obs_data_get_bool(settings, "auto_start_replay")
+    enable_cleanup       = obs.obs_data_get_bool(settings, "enable_cleanup")
+    cleanup_threshold    = obs.obs_data_get_int(settings,  "cleanup_threshold")
+    val2 = obs.obs_data_get_string(settings, "ffmpeg_exe")
+    ffmpeg_exe           = val2 if val2.strip() else "ffmpeg"
 
 
 # ─── Helpers de nombre y path ─────────────────────────────────────────────────
@@ -100,12 +135,111 @@ def apply_path_to_config(path):
     return True
 
 def set_paths_for_folder(folder_name):
+    global _current_recording_folder
+    
+    # Limpiar carpeta anterior si existe y está activada la limpieza
+    if enable_cleanup and _current_recording_folder:
+        print("[Cleanup] Limpiando carpeta anterior: '{}'".format(_current_recording_folder))
+        _cleanup_black_files(_current_recording_folder)
+    
     target = os.path.join(base_folder, folder_name)
     ensure_folder(target)
     ok = apply_path_to_config(target)
     if ok:
+        _current_recording_folder = target
         obs.script_log(obs.LOG_INFO, "Path actualizado -> '{}'".format(target))
     return ok
+
+
+# ─── Limpieza de grabaciones en negro ─────────────────────────────────────────
+
+_VIDEO_EXTS = ("*.mkv", "*.mp4", "*.flv", "*.mov", "*.ts", "*.avi", "*.fragmented.mov")
+
+def _delete_empty_folder(folder):
+    """Borra carpeta si está vacía (solo archivos ocultos del sistema)."""
+    if not folder or not os.path.isdir(folder):
+        return
+    
+    # No borrar la carpeta base del usuario
+    if base_folder:
+        try:
+            if os.path.normpath(os.path.abspath(folder)) == os.path.normpath(os.path.abspath(base_folder)):
+                print("[Cleanup] Carpeta base, no se borra: '{}'".format(folder))
+                return
+        except:
+            pass
+    
+    try:
+        items = os.listdir(folder)
+        non_hidden = [i for i in items if not i.startswith('.') and i.lower() != 'thumbs.db']
+        print("[Cleanup] Carpeta '{}' tiene {} items (no ocultos)".format(folder, len(non_hidden)))
+        
+        if not non_hidden:
+            os.rmdir(folder)
+            print("[Cleanup] ✓ Carpeta vacía eliminada: '{}'".format(folder))
+        else:
+            print("[Cleanup] Carpeta no vacía, items: {}".format(non_hidden))
+    except Exception as e:
+        print("[Cleanup] Error al borrar carpeta: {}".format(e))
+
+def _cleanup_black_files(folder):
+    """Limpia grabaciones negras en la carpeta especificada."""
+    _cleanup_black_files_in_folder(folder, cleanup_threshold, ffmpeg_exe)
+
+def _cleanup_black_files_in_folder(folder, threshold, ffmpeg):
+    """Limpia grabaciones negras en la carpeta especificada con parámetros."""
+    if not folder or not os.path.isdir(folder):
+        return
+
+    # Buscar videos
+    candidates = []
+    for ext in _VIDEO_EXTS:
+        candidates.extend(glob.glob(os.path.join(folder, ext)))
+
+    if not candidates:
+        return
+
+    print("[Cleanup] Analizando {} videos en '{}'".format(len(candidates), folder))
+
+    # Analizar cada video
+    for filepath in candidates:
+        try:
+            # blackdetect
+            cmd = [ffmpeg, "-i", filepath, "-vf", "blackdetect=d=0:pix_th=0.10:picture_black_ratio_th=0.98", "-an", "-f", "null", "-"]
+            result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60)
+            output = result.stderr.decode("utf-8", errors="replace")
+
+            match = re.search(r"black_duration:([\d\.]+)", output)
+            duration_match = re.search(r"Duration:\s+(\d+):(\d+):(\d+\.?\d*)", output)
+
+            if match and duration_match:
+                total_black = float(match.group(1))
+                total_secs = int(duration_match.group(1)) * 3600 + int(duration_match.group(2)) * 60 + float(duration_match.group(3))
+                ratio_pct = (total_black / total_secs) * 100 if total_secs > 0 else 0
+
+                print("[Cleanup] Video '{}' - {:.0f}% negro".format(os.path.basename(filepath), ratio_pct))
+
+                if ratio_pct >= threshold:
+                    folder_path = os.path.dirname(filepath)
+                    os.remove(filepath)
+                    print("[Cleanup] ✓ Eliminado video negro ({:.0f}%): '{}'".format(ratio_pct, filepath))
+                    _delete_empty_folder(folder_path)
+                else:
+                    print("[Cleanup] ✓ Video conservado ({:.0f}% < {}%)".format(ratio_pct, threshold))
+
+        except Exception as e:
+            print("[Cleanup] Error analizando '{}': {}".format(filepath, e))
+    
+    # Verificación final: si la carpeta quedó vacía después de procesar todos los archivos
+    try:
+        if os.path.isdir(folder):
+            items = os.listdir(folder)
+            non_hidden = [i for i in items if not i.startswith('.') and i.lower() != 'thumbs.db']
+            if not non_hidden:
+                print("[Cleanup] Verificación final: carpeta vacía, eliminando '{}'".format(folder))
+                _delete_empty_folder(folder)
+    except Exception as e:
+        print("[Cleanup] Error en verificación final: {}".format(e))
 
 
 # ─── Arranque diferido tras STOPPED ──────────────────────────────────────────
@@ -249,6 +383,26 @@ def on_event(event):
 
 def script_load(settings):
     obs.obs_frontend_add_event_callback(on_event)
+    
+    # Leer settings directamente para limpieza al inicio
+    cleanup_enabled = obs.obs_data_get_bool(settings, "enable_cleanup")
+    base = obs.obs_data_get_string(settings, "base_folder")
+    threshold = obs.obs_data_get_int(settings, "cleanup_threshold")
+    ffmpeg = obs.obs_data_get_string(settings, "ffmpeg_exe")
+    if not ffmpeg.strip():
+        ffmpeg = "ffmpeg"
+    
+    # Limpiar todas las carpetas al arrancar si está activado
+    if cleanup_enabled and base:
+        print("[Cleanup] Limpiando todas las carpetas al arrancar...")
+        try:
+            for item in os.listdir(base):
+                folder_path = os.path.join(base, item)
+                if os.path.isdir(folder_path):
+                    _cleanup_black_files_in_folder(folder_path, threshold, ffmpeg)
+        except Exception as e:
+            print("[Cleanup] Error al limpiar carpetas: {}".format(e))
+    
     obs.script_log(obs.LOG_INFO, "Set-Escene-Path cargado.")
 
 def script_unload():
