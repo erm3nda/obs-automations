@@ -2,6 +2,14 @@
 # Copia set-escene-path.py al directorio de scripts de OBS Studio.
 # Compatible con cualquier usuario y cualquier instalacion estandar de OBS.
 
+# Verificar si se ejecuta como Administrador, si no, autoelevarse
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host "Solicitando permisos de Administrador..." -ForegroundColor Yellow
+    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    exit
+}
+
 $scriptName  = "set-escene-path.py"
 $sourceFile  = Join-Path $PSScriptRoot $scriptName
 $obsScriptsDir = Join-Path $env:ProgramFiles "obs-studio\data\obs-plugins\frontend-tools\scripts"
