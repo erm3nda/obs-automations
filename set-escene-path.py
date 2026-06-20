@@ -2,7 +2,15 @@ import obspython as obs
 import os
 import re
 import glob
-import subprocess
+import threading
+import time
+
+try:
+    import cv2
+    import numpy as np
+    _has_opencv = True
+except ImportError:
+    _has_opencv = False
 
 # ─── Config defaults ──────────────────────────────────────────────────────────
 base_folder          = ""      # debe configurarse en el plugin antes de funcionar
@@ -12,8 +20,8 @@ auto_start_replay    = False
 
 # Limpieza de grabaciones "en negro"
 enable_cleanup    = False
+min_size_mb       = 25            # Tamaño mínimo en MB para conservar el vídeo (0-500)
 cleanup_threshold = 90        # % mínimo de negro para eliminar (0-100)
-ffmpeg_exe        = "ffmpeg"  # ruta a ffmpeg o "ffmpeg" si está en PATH
 
 # Intencion capturada en el momento del cambio de escena
 _want_restart_recording = False
@@ -25,6 +33,7 @@ _pending_start_replay    = False
 
 # Tracking de carpeta activa para cleanup
 _current_recording_folder = None
+_active_recording_folder  = None
 
 
 # ─── Script metadata ──────────────────────────────────────────────────────────
@@ -60,17 +69,17 @@ def script_properties():
     # Sección limpieza
     obs.obs_properties_add_bool(
         props, "enable_cleanup",
-        "🗑 Eliminar grabaciones 'en negro'"
+        "🗑 Eliminar grabaciones 'en negro' / cortas (Requiere OpenCV)"
+    )
+    obs.obs_properties_add_int(
+        props, "min_size_mb",
+        "  Tamaño mín. para conservar (MB)",
+        0, 500, 1
     )
     obs.obs_properties_add_int_slider(
         props, "cleanup_threshold",
-        "  % negro para eliminar",
+        "  % negro para eliminar (si supera tamaño mín.)",
         50, 100, 1
-    )
-    obs.obs_properties_add_text(
-        props, "ffmpeg_exe",
-        "  Ruta FFmpeg (vacío = PATH)",
-        obs.OBS_TEXT_DEFAULT
     )
 
     return props
@@ -81,21 +90,38 @@ def script_defaults(settings):
     obs.obs_data_set_default_bool(settings, "auto_start_recording", False)
     obs.obs_data_set_default_bool(settings, "auto_start_replay",    False)
     obs.obs_data_set_default_bool(settings, "enable_cleanup",       False)
+    obs.obs_data_set_default_int(settings,  "min_size_mb",          25)
     obs.obs_data_set_default_int(settings,  "cleanup_threshold",    90)
-    obs.obs_data_set_default_string(settings, "ffmpeg_exe",         "ffmpeg")
 
 def script_update(settings):
     global base_folder, keep_recording, auto_start_recording, auto_start_replay
-    global enable_cleanup, cleanup_threshold, ffmpeg_exe
+    global enable_cleanup, min_size_mb, cleanup_threshold
+    global _current_recording_folder
     val = obs.obs_data_get_string(settings, "base_folder")
     base_folder          = val if val else ""
     keep_recording       = obs.obs_data_get_bool(settings, "keep_recording")
     auto_start_recording = obs.obs_data_get_bool(settings, "auto_start_recording")
     auto_start_replay    = obs.obs_data_get_bool(settings, "auto_start_replay")
     enable_cleanup       = obs.obs_data_get_bool(settings, "enable_cleanup")
+    min_size_mb          = obs.obs_data_get_int(settings,  "min_size_mb")
     cleanup_threshold    = obs.obs_data_get_int(settings,  "cleanup_threshold")
-    val2 = obs.obs_data_get_string(settings, "ffmpeg_exe")
-    ffmpeg_exe           = val2 if val2.strip() else "ffmpeg"
+    
+    # Inicializar _current_recording_folder si no está establecido
+    if not _current_recording_folder and base_folder:
+        try:
+            sc = obs.obs_frontend_get_current_scene()
+            if sc:
+                scene_name = obs.obs_source_get_name(sc)
+                obs.obs_source_release(sc)
+                folder_name = clean_name_for_folder(scene_name)
+                _current_recording_folder = os.path.join(base_folder, folder_name)
+        except Exception as e:
+            obs.script_log(obs.LOG_WARNING, "No se pudo pre-inicializar el path de escena: {}".format(e))
+            
+    if enable_cleanup and not _has_opencv:
+        obs.script_log(obs.LOG_WARNING,
+            "[Cleanup] ADVERTENCIA: La limpieza de videos está activada pero OpenCV (cv2) no está disponible. "
+            "Por favor, instala opencv-python en tu entorno de Python (ej: pip install opencv-python numpy) para usar esta función.")
 
 
 # ─── Helpers de nombre y path ─────────────────────────────────────────────────
@@ -137,11 +163,6 @@ def apply_path_to_config(path):
 def set_paths_for_folder(folder_name):
     global _current_recording_folder
     
-    # Limpiar carpeta anterior si existe y está activada la limpieza
-    if enable_cleanup and _current_recording_folder:
-        print("[Cleanup] Limpiando carpeta anterior: '{}'".format(_current_recording_folder))
-        _cleanup_black_files(_current_recording_folder)
-    
     target = os.path.join(base_folder, folder_name)
     ensure_folder(target)
     ok = apply_path_to_config(target)
@@ -182,64 +203,118 @@ def _delete_empty_folder(folder):
     except Exception as e:
         print("[Cleanup] Error al borrar carpeta: {}".format(e))
 
-def _cleanup_black_files(folder):
-    """Limpia grabaciones negras en la carpeta especificada."""
-    _cleanup_black_files_in_folder(folder, cleanup_threshold, ffmpeg_exe)
-
-def _cleanup_black_files_in_folder(folder, threshold, ffmpeg):
-    """Limpia grabaciones negras en la carpeta especificada con parámetros."""
+def get_newest_video_file(folder):
+    """Obtiene el archivo de video más recientemente modificado en la carpeta."""
     if not folder or not os.path.isdir(folder):
-        return
-
-    # Buscar videos
+        return None
     candidates = []
     for ext in _VIDEO_EXTS:
         candidates.extend(glob.glob(os.path.join(folder, ext)))
-
     if not candidates:
+        return None
+    try:
+        candidates.sort(key=os.path.getmtime, reverse=True)
+        return candidates[0]
+    except Exception as e:
+        print("[Cleanup] Error al ordenar candidatos: {}".format(e))
+        return None
+
+def _async_cleanup_file(filepath, min_size, threshold):
+    """Corre en un thread separado para evitar colgar la UI de OBS."""
+    # Esperar 2 segundos para asegurar que OBS haya liberado el archivo por completo
+    time.sleep(2.0)
+    
+    if not filepath or not os.path.exists(filepath):
         return
 
-    print("[Cleanup] Analizando {} videos en '{}'".format(len(candidates), folder))
-
-    # Analizar cada video
-    for filepath in candidates:
-        try:
-            # blackdetect
-            cmd = [ffmpeg, "-i", filepath, "-vf", "blackdetect=d=0:pix_th=0.10:picture_black_ratio_th=0.98", "-an", "-f", "null", "-"]
-            result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60)
-            output = result.stderr.decode("utf-8", errors="replace")
-
-            match = re.search(r"black_duration:([\d\.]+)", output)
-            duration_match = re.search(r"Duration:\s+(\d+):(\d+):(\d+\.?\d*)", output)
-
-            if match and duration_match:
-                total_black = float(match.group(1))
-                total_secs = int(duration_match.group(1)) * 3600 + int(duration_match.group(2)) * 60 + float(duration_match.group(3))
-                ratio_pct = (total_black / total_secs) * 100 if total_secs > 0 else 0
-
-                print("[Cleanup] Video '{}' - {:.0f}% negro".format(os.path.basename(filepath), ratio_pct))
-
-                if ratio_pct >= threshold:
-                    folder_path = os.path.dirname(filepath)
-                    os.remove(filepath)
-                    print("[Cleanup] ✓ Eliminado video negro ({:.0f}%): '{}'".format(ratio_pct, filepath))
-                    _delete_empty_folder(folder_path)
-                else:
-                    print("[Cleanup] ✓ Video conservado ({:.0f}% < {}%)".format(ratio_pct, threshold))
-
-        except Exception as e:
-            print("[Cleanup] Error analizando '{}': {}".format(filepath, e))
-    
-    # Verificación final: si la carpeta quedó vacía después de procesar todos los archivos
+    # Si el archivo es menor que el tamaño mínimo configurado, se elimina directamente
     try:
-        if os.path.isdir(folder):
-            items = os.listdir(folder)
-            non_hidden = [i for i in items if not i.startswith('.') and i.lower() != 'thumbs.db']
-            if not non_hidden:
-                print("[Cleanup] Verificación final: carpeta vacía, eliminando '{}'".format(folder))
-                _delete_empty_folder(folder)
+        size = os.path.getsize(filepath)
+        min_size_bytes = min_size * 1024 * 1024
+        if size < min_size_bytes:
+            print("[Cleanup] Video '{}' es demasiado pequeño ({:.2f} MB < {} MB). Se elimina inmediatamente.".format(
+                os.path.basename(filepath), size / (1024 * 1024), min_size))
+            folder_path = os.path.dirname(filepath)
+            os.remove(filepath)
+            _delete_empty_folder(folder_path)
+            return
     except Exception as e:
-        print("[Cleanup] Error en verificación final: {}".format(e))
+        print("[Cleanup] Error al verificar tamaño de '{}': {}".format(filepath, e))
+        return
+
+    if not _has_opencv:
+        print("[Cleanup] OpenCV no está disponible. No se puede realizar el análisis de negro.")
+        return
+
+    try:
+        print("[Cleanup] Iniciando análisis nativo con OpenCV para '{}'...".format(os.path.basename(filepath)))
+        
+        cap = cv2.VideoCapture(filepath)
+        if not cap.isOpened():
+            print("[Cleanup] OpenCV no pudo abrir el archivo: '{}'".format(filepath))
+            return
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            # Video sin frames, se considera malo
+            cap.release()
+            print("[Cleanup] Video sin frames. Se elimina.")
+            folder_path = os.path.dirname(filepath)
+            os.remove(filepath)
+            _delete_empty_folder(folder_path)
+            return
+
+        # Muestrear primer frame, del medio y último frame
+        frames_to_check = [0]
+        if total_frames > 2:
+            frames_to_check.append(total_frames // 2)
+        if total_frames > 1:
+            frames_to_check.append(total_frames - 1)
+
+        black_frames = 0
+        valid_samples = 0
+
+        for f_idx in frames_to_check:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                continue
+
+            valid_samples += 1
+            # Calcular brillo medio del frame
+            # frame es array HxWxC en BGR. Calcular media.
+            mean_brightness = np.mean(frame)
+            # Consideramos negro si el brillo medio es < 15 (sobre 255)
+            if mean_brightness < 15.0:
+                black_frames += 1
+
+        cap.release()
+
+        if valid_samples > 0:
+            ratio_pct = (black_frames / valid_samples) * 100
+            print("[Cleanup] OpenCV: {:.0f}% de los frames analizados son negros ({} de {})".format(
+                ratio_pct, black_frames, valid_samples))
+
+            if ratio_pct >= threshold:
+                folder_path = os.path.dirname(filepath)
+                os.remove(filepath)
+                print("[Cleanup] ✓ Eliminado video negro ({:.0f}%): '{}'".format(ratio_pct, filepath))
+                _delete_empty_folder(folder_path)
+            else:
+                print("[Cleanup] ✓ Video conservado ({:.0f}% < {}%)".format(ratio_pct, threshold))
+        else:
+            print("[Cleanup] No se pudieron decodificar frames del video: '{}'".format(filepath))
+
+    except Exception as e:
+        print("[Cleanup] Error analizando '{}' con OpenCV: {}".format(filepath, e))
+
+def trigger_cleanup_for_file(filepath):
+    """Inicia el análisis de limpieza en un thread de fondo daemon."""
+    if not filepath or not os.path.exists(filepath):
+        return
+    thread = threading.Thread(target=_async_cleanup_file, args=(filepath, min_size_mb, cleanup_threshold))
+    thread.daemon = True
+    thread.start()
 
 
 # ─── Arranque diferido tras STOPPED ──────────────────────────────────────────
@@ -358,11 +433,24 @@ def handle_scene_changed():
 
 def on_event(event):
     global _pending_start_recording, _pending_start_replay
+    global _active_recording_folder
 
     if event == obs.OBS_FRONTEND_EVENT_SCENE_CHANGED:
         handle_scene_changed()
 
+    elif event == obs.OBS_FRONTEND_EVENT_RECORDING_STARTED:
+        _active_recording_folder = _current_recording_folder
+        print("[Cleanup] Grabación iniciada. Carpeta activa guardada: '{}'".format(_active_recording_folder))
+
     elif event == obs.OBS_FRONTEND_EVENT_RECORDING_STOPPED:
+        if enable_cleanup and _active_recording_folder:
+            newest_video = get_newest_video_file(_active_recording_folder)
+            if newest_video:
+                print("[Cleanup] Grabación finalizada en '{}'. Iniciando limpieza en background para '{}'".format(
+                    _active_recording_folder, os.path.basename(newest_video)))
+                trigger_cleanup_for_file(newest_video)
+            _active_recording_folder = None
+
         if _pending_start_recording:
             _pending_start_recording = False
             obs.script_log(obs.LOG_INFO,
@@ -382,27 +470,21 @@ def on_event(event):
 # ─── Ciclo de vida del script ─────────────────────────────────────────────────
 
 def script_load(settings):
+    global _current_recording_folder
     obs.obs_frontend_add_event_callback(on_event)
     
-    # Leer settings directamente para limpieza al inicio
-    cleanup_enabled = obs.obs_data_get_bool(settings, "enable_cleanup")
-    base = obs.obs_data_get_string(settings, "base_folder")
-    threshold = obs.obs_data_get_int(settings, "cleanup_threshold")
-    ffmpeg = obs.obs_data_get_string(settings, "ffmpeg_exe")
-    if not ffmpeg.strip():
-        ffmpeg = "ffmpeg"
-    
-    # Limpiar todas las carpetas al arrancar si está activado
-    if cleanup_enabled and base:
-        print("[Cleanup] Limpiando todas las carpetas al arrancar...")
-        try:
-            for item in os.listdir(base):
-                folder_path = os.path.join(base, item)
-                if os.path.isdir(folder_path):
-                    _cleanup_black_files_in_folder(folder_path, threshold, ffmpeg)
-        except Exception as e:
-            print("[Cleanup] Error al limpiar carpetas: {}".format(e))
-    
+    # Intentar inicializar la carpeta actual al arrancar
+    try:
+        sc = obs.obs_frontend_get_current_scene()
+        if sc:
+            scene_name = obs.obs_source_get_name(sc)
+            obs.obs_source_release(sc)
+            folder_name = clean_name_for_folder(scene_name)
+            if base_folder:
+                _current_recording_folder = os.path.join(base_folder, folder_name)
+    except:
+        pass
+        
     obs.script_log(obs.LOG_INFO, "Set-Escene-Path cargado.")
 
 def script_unload():
