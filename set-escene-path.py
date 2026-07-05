@@ -14,6 +14,7 @@ except ImportError:
 
 # ─── Config defaults ──────────────────────────────────────────────────────────
 base_folder          = ""      # debe configurarse en el plugin antes de funcionar
+base_filename_format = ""
 keep_recording       = False
 auto_start_recording = False
 auto_start_replay    = False
@@ -53,6 +54,11 @@ def script_properties():
         props, "base_folder", "Carpeta base",
         obs.OBS_PATH_DIRECTORY, "", None
     )
+    obs.obs_properties_add_text(
+        props, "base_filename_format",
+        "Formato de nombre base (vacío = auto)",
+        obs.OBS_TEXT_DEFAULT
+    )
     obs.obs_properties_add_bool(
         props, "keep_recording",
         "Mantener grabación activa al cambiar escena"
@@ -86,6 +92,7 @@ def script_properties():
 
 def script_defaults(settings):
     obs.obs_data_set_default_string(settings, "base_folder", "")
+    obs.obs_data_set_default_string(settings, "base_filename_format", "")
     obs.obs_data_set_default_bool(settings, "keep_recording",       False)
     obs.obs_data_set_default_bool(settings, "auto_start_recording", False)
     obs.obs_data_set_default_bool(settings, "auto_start_replay",    False)
@@ -96,7 +103,7 @@ def script_defaults(settings):
 def script_update(settings):
     global base_folder, keep_recording, auto_start_recording, auto_start_replay
     global enable_cleanup, min_size_mb, cleanup_threshold
-    global _current_recording_folder
+    global _current_recording_folder, base_filename_format
     val = obs.obs_data_get_string(settings, "base_folder")
     base_folder          = val if val else ""
     keep_recording       = obs.obs_data_get_bool(settings, "keep_recording")
@@ -106,6 +113,16 @@ def script_update(settings):
     min_size_mb          = obs.obs_data_get_int(settings,  "min_size_mb")
     cleanup_threshold    = obs.obs_data_get_int(settings,  "cleanup_threshold")
     
+    # Inicializar base_filename_format si no está establecido
+    base_filename_format = obs.obs_data_get_string(settings, "base_filename_format")
+    if not base_filename_format:
+        config = obs.obs_frontend_get_profile_config()
+        if config:
+            val_format = obs.config_get_string(config, "Output", "FilenameFormatting")
+            if val_format:
+                base_filename_format = val_format
+                obs.obs_data_set_string(settings, "base_filename_format", val_format)
+                
     # Inicializar _current_recording_folder si no está establecido
     if not _current_recording_folder and base_folder:
         try:
@@ -141,6 +158,25 @@ def clean_name_for_folder(name):
     name = re.sub(r'\s*escene\s*$', '', name, flags=re.IGNORECASE).strip()
     return name if name else "unnamed"
 
+def clean_name_for_filename(name):
+    """
+    Limpia el nombre de la escena para usarlo como prefijo de archivo:
+    - Quita marcas registradas y caracteres especiales.
+    - Reemplaza espacios y otros caracteres no válidos por '_'.
+    - Quita el sufijo ' escene' / ' escene' (case insensitive).
+    - Une guiones bajos consecutivos en uno solo.
+    """
+    name = re.sub(r'[\u2122\u00ae\u00a9]', '', name)
+    name = re.sub(r'\s*\((tm|r|c)\)\s*', '_', name, flags=re.IGNORECASE)
+    name = re.sub(r'[<>:"/\\|?*]', '_', name)
+    # Reemplazar cualquier espacio (incluyendo múltiples) por '_'
+    name = re.sub(r'\s+', '_', name)
+    # Quitar sufijo " escene"
+    name = re.sub(r'_*escene_*$', '', name, flags=re.IGNORECASE)
+    # Reemplazar múltiples guiones bajos consecutivos por uno solo
+    name = re.sub(r'_+', '_', name)
+    return name.strip('_')
+
 def ensure_folder(path):
     try:
         os.makedirs(path, exist_ok=True)
@@ -148,28 +184,36 @@ def ensure_folder(path):
         obs.script_log(obs.LOG_WARNING,
             "No se pudo crear carpeta '{}': {}".format(path, e))
 
-def apply_path_to_config(path):
-    """Escribe el path en el perfil activo de OBS (modo Simple y Avanzado)."""
+def set_paths_for_scene(scene_name):
+    global _current_recording_folder
+    
+    folder_name = clean_name_for_folder(scene_name)
+    target = os.path.join(base_folder, folder_name)
+    ensure_folder(target)
+    
     config = obs.obs_frontend_get_profile_config()
     if config is None:
         obs.script_log(obs.LOG_WARNING, "No se pudo obtener el config del perfil.")
         return False
-    obs.config_set_string(config, "SimpleOutput", "FilePath", path)
-    obs.config_set_string(config, "AdvOut", "RecFilePath", path)
-    obs.config_set_string(config, "AdvOut", "FFFilePath",  path)
-    obs.config_save_safe(config, "tmp", None)
-    return True
-
-def set_paths_for_folder(folder_name):
-    global _current_recording_folder
+        
+    obs.config_set_string(config, "SimpleOutput", "FilePath", target)
+    obs.config_set_string(config, "AdvOut", "RecFilePath", target)
+    obs.config_set_string(config, "AdvOut", "FFFilePath",  target)
     
-    target = os.path.join(base_folder, folder_name)
-    ensure_folder(target)
-    ok = apply_path_to_config(target)
-    if ok:
-        _current_recording_folder = target
-        obs.script_log(obs.LOG_INFO, "Path actualizado -> '{}'".format(target))
-    return ok
+    # Actualizar el formato de nombre de archivo con el prefijo de la escena
+    prefix = clean_name_for_filename(scene_name)
+    if prefix:
+        new_format = "{}_{}".format(prefix, base_filename_format)
+    else:
+        new_format = base_filename_format
+        
+    obs.config_set_string(config, "Output", "FilenameFormatting", new_format)
+    obs.config_save_safe(config, "tmp", None)
+    
+    _current_recording_folder = target
+    obs.script_log(obs.LOG_INFO, "Path actualizado -> '{}'".format(target))
+    obs.script_log(obs.LOG_INFO, "Formato de nombre actualizado -> '{}'".format(new_format))
+    return True
 
 
 # ─── Limpieza de grabaciones en negro ─────────────────────────────────────────
@@ -409,8 +453,8 @@ def handle_scene_changed():
     obs.script_log(obs.LOG_INFO, "  Path completo : '{}'".format(
         os.path.join(base_folder, folder_name)))
 
-    # Actualizar path en config ahora (no afecta grabacion activa)
-    set_paths_for_folder(folder_name)
+    # Actualizar path y formato en config ahora (no afecta grabacion activa)
+    set_paths_for_scene(scene_name)
 
     # Capturar estado actual
     recording_active = obs.obs_frontend_recording_active()
