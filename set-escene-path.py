@@ -24,6 +24,17 @@ enable_cleanup    = False
 min_size_mb       = 25            # Tamaño mínimo en MB para conservar el vídeo (0-500)
 cleanup_threshold = 90        # % mínimo de negro para eliminar (0-100)
 
+# Mapeo de nombres de escena a nombres de juegos reales
+# Añade aquí tus alias. Ejemplo: 'fv5' -> 'Battlefield V'
+SCENE_ALIASES = {
+    'fv5': 'Battlefield V',
+    'bf6': 'Battlefield 6',
+    'pubg': 'PLAYERUNKNOWN\'S BATTLEGROUNDS',
+    'ac': 'Assetto Corsa',
+    'acevo': 'Assetto Corsa EVO',
+    'rf2': 'rFactor 2(rFactor2.exe)',
+}
+
 # Intencion capturada en el momento del cambio de escena
 _want_restart_recording = False
 _want_restart_replay    = False
@@ -150,6 +161,13 @@ def clean_name_for_folder(name):
       'Battlefield™ 2042'             -> 'Battlefield 2042'
       'Call of Duty®: Modern Warfare' -> 'Call of Duty  Modern Warfare'
     """
+    # 1. Aplicar alias si existe (sin importar mayúsculas/minúsculas)
+    lower_name = name.lower()
+    for alias, real_name in SCENE_ALIASES.items():
+        if alias in lower_name:
+            return real_name
+
+    # 2. Limpieza estándar si no hay alias
     name = re.sub(r'[\u2122\u00ae\u00a9]', '', name)
     name = re.sub(r'\s*\((tm|r|c)\)\s*', ' ', name, flags=re.IGNORECASE)
     name = re.sub(r'[<>:"/\\|?*]', ' ', name)
@@ -160,22 +178,10 @@ def clean_name_for_folder(name):
 
 def clean_name_for_filename(name):
     """
-    Limpia el nombre de la escena para usarlo como prefijo de archivo:
-    - Quita marcas registradas y caracteres especiales.
-    - Reemplaza espacios y otros caracteres no válidos por '_'.
-    - Quita el sufijo ' escene' / ' escene' (case insensitive).
-    - Une guiones bajos consecutivos en uno solo.
+    Devuelve el nombre del juego usando la misma lógica que las carpetas
+    para mantener consistencia.
     """
-    name = re.sub(r'[\u2122\u00ae\u00a9]', '', name)
-    name = re.sub(r'\s*\((tm|r|c)\)\s*', '_', name, flags=re.IGNORECASE)
-    name = re.sub(r'[<>:"/\\|?*]', '_', name)
-    # Reemplazar cualquier espacio (incluyendo múltiples) por '_'
-    name = re.sub(r'\s+', '_', name)
-    # Quitar sufijo " escene"
-    name = re.sub(r'_*escene_*$', '', name, flags=re.IGNORECASE)
-    # Reemplazar múltiples guiones bajos consecutivos por uno solo
-    name = re.sub(r'_+', '_', name)
-    return name.strip('_')
+    return clean_name_for_folder(name)
 
 def ensure_folder(path):
     try:
@@ -200,13 +206,14 @@ def set_paths_for_scene(scene_name):
     obs.config_set_string(config, "AdvOut", "RecFilePath", target)
     obs.config_set_string(config, "AdvOut", "FFFilePath",  target)
     
-    # Actualizar el formato de nombre de archivo con el prefijo de la escena
-    prefix = clean_name_for_filename(scene_name)
-    if prefix:
-        new_format = "{}_{}".format(prefix, base_filename_format)
+    # Aplicar formato de Nvidia al nombre del archivo
+    # Nvidia usa: "GameName Replay YYYY.MM.DD - HH.MM.SS.DVR"
+    file_prefix = clean_name_for_filename(scene_name)
+    if base_filename_format:
+        new_format = file_prefix + " Replay " + base_filename_format
     else:
-        new_format = base_filename_format
-        
+        new_format = file_prefix + " Replay %CCYY.%MM.%DD - %hh.%mm.%ss.DVR"
+    
     obs.config_set_string(config, "Output", "FilenameFormatting", new_format)
     obs.config_save_safe(config, "tmp", None)
     
