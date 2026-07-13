@@ -134,15 +134,14 @@ def script_update(settings):
                 base_filename_format = val_format
                 obs.obs_data_set_string(settings, "base_filename_format", val_format)
                 
-    # Inicializar _current_recording_folder si no está establecido
-    if not _current_recording_folder and base_folder:
+    # Asegurar que el path de la escena actual se aplica (ej: al cargar el script o cambiar la carpeta base)
+    if base_folder:
         try:
             sc = obs.obs_frontend_get_current_scene()
             if sc:
                 scene_name = obs.obs_source_get_name(sc)
                 obs.obs_source_release(sc)
-                folder_name = clean_name_for_folder(scene_name)
-                _current_recording_folder = os.path.join(base_folder, folder_name)
+                set_paths_for_scene(scene_name)
         except Exception as e:
             obs.script_log(obs.LOG_WARNING, "No se pudo pre-inicializar el path de escena: {}".format(e))
             
@@ -161,10 +160,10 @@ def clean_name_for_folder(name):
       'Battlefield™ 2042'             -> 'Battlefield 2042'
       'Call of Duty®: Modern Warfare' -> 'Call of Duty  Modern Warfare'
     """
-    # 1. Aplicar alias si existe (sin importar mayúsculas/minúsculas)
+    # 1. Aplicar alias si existe (usando limites de palabra para evitar falsos positivos como 'ac' en 'facecam')
     lower_name = name.lower()
     for alias, real_name in SCENE_ALIASES.items():
-        if alias in lower_name:
+        if re.search(r'\b' + re.escape(alias) + r'\b', lower_name):
             return real_name
 
     # 2. Limpieza estándar si no hay alias
