@@ -1,0 +1,11 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# OBS logs
+*.log
+
+# Windows
+Thumbs.db
+Desktop.ini

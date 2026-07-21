@@ -1,33 +1,15 @@
-# set-escene-path
+# OBS Automations
 
-OBS Studio script that automatically sets the **recording** and **replay buffer** output path when switching scenes.
+Colección de scripts y plugins en Python para **OBS Studio** organizados por módulos independientes:
 
-## Features
+## Plugins incluidos
 
-- Folder name derived from the active scene name (strips invalid characters and trailing `escene` suffix)
-- **Auto-start** recording and/or replay buffer on scene switch
-- **Keep recording** mode — updates path silently without interrupting active recordings
-- Stream is never touched
+1. **`set-escene-paths`**: Cambia automáticamente la ruta de salida de grabación y Replay Buffer según la escena activa (con limpieza de vídeos vacíos/negros vía OpenCV).
+2. **`set-stream-info`**: Configura título, descripción y categoría del directo en Twitch/YouTube mediante API/OBS frontend tools.
+3. **`set-animation-on-twitch-subscribe`**: Dispara alertas visuales/animaciones o cambia de escena/fuente cuando entra una nueva suscripción de Twitch.
+4. **`set-text-on-twitch-chat`**: Envía mensajes automáticos al chat de Twitch o actualiza fuentes de texto en OBS según eventos de chat.
 
-## Installation
+## Instalación
 
-Run `install.ps1` as Administrator. It copies the script to:
-```
-%ProgramFiles%\obs-studio\data\obs-plugins\frontend-tools\scripts\
-```
-Then in OBS: **Tools → Scripts → [+] → set-escene-path.py**
-
-## Options
-
-| Option | Description |
-|---|---|
-| Base folder | Root folder where per-scene subfolders are created |
-| Keep recording active | Don't stop on scene switch; new path applies on next session |
-| Auto-start recording | Start recording automatically on scene switch |
-| Auto-start replay buffer | Start replay buffer automatically on scene switch |
-
-## Scene naming
-
-Name your scenes after the game. The script strips `™ ® ©`, Windows-invalid characters, and a trailing `escene` suffix.
-
-Example: `BFV escene` → folder `BFV`
+Cada plugin cuenta con su propio script de instalación en PowerShell (`install.ps1`).  
+Revisa la documentación específica dentro de cada carpeta para más información sobre requisitos y configuración.
