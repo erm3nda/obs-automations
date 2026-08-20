@@ -636,18 +636,21 @@ def update_vertical_scene_controls(horizontal_scene):
         time.sleep(0.5)
         aitum_vendor_request("start_backtrack")
         obs.script_log(obs.LOG_INFO, "Backtrack vertical reiniciado.")
-    if auto_start_vertical_recording and not keep_vertical_recording:
-        aitum_vendor_request("stop_recording")
-        time.sleep(0.5)
-        aitum_vendor_request("start_recording")
-        obs.script_log(obs.LOG_INFO, "Grabación vertical reiniciada.")
-    elif auto_start_vertical_recording and keep_vertical_recording:
-        status = aitum_vendor_request("status") or {}
-        if status.get("recording"):
+    status = aitum_vendor_request("status") or {}
+    recording_active = bool(status.get("recording"))
+    if keep_vertical_recording:
+        if recording_active:
             obs.script_log(obs.LOG_INFO, "Grabación vertical mantenida al cambiar de escena.")
-        else:
+        elif auto_start_vertical_recording:
             aitum_vendor_request("start_recording")
             obs.script_log(obs.LOG_INFO, "Grabación vertical iniciada sin interrumpirla.")
+    elif recording_active:
+        aitum_vendor_request("stop_recording")
+        obs.script_log(obs.LOG_INFO, "Grabación vertical detenida al cambiar de escena.")
+        if auto_start_vertical_recording:
+            time.sleep(0.5)
+            aitum_vendor_request("start_recording")
+            obs.script_log(obs.LOG_INFO, "Grabación vertical reiniciada por auto-start.")
 
 def start_vertical_scene_update(horizontal_scene):
     """Ejecuta el control remoto de Aitum fuera del callback principal de OBS."""
