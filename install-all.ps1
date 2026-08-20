@@ -24,6 +24,13 @@ if (-not $installScripts) {
     exit 0
 }
 
+$installScripts = @($installScripts | Sort-Object FullName)
+Write-Host "Instaladores detectados: $($installScripts.Count)" -ForegroundColor Cyan
+foreach ($script in $installScripts) {
+    Write-Host "  - $($script.Directory.Name)" -ForegroundColor DarkCyan
+}
+Write-Host ""
+
 # Establecer variable de entorno para que los scripts hijos sepan que el maestro ya está elevado
 $env:OBS_AUTO_INSTALL_RUNNING = "True"
 
@@ -36,6 +43,9 @@ foreach ($script in $installScripts) {
     
     try {
         & $script.FullName
+        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+            throw "El instalador terminó con código $LASTEXITCODE"
+        }
         $installedCount++
     } catch {
         Write-Error "Fallo al ejecutar instalador de $pluginName : $_"

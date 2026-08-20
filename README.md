@@ -6,8 +6,7 @@ Colección de scripts y plugins en Python para **OBS Studio** organizados por m�
 
 1. **`set-escene-paths`**: Cambia automáticamente la ruta de salida de grabación y Replay Buffer según la escena activa (con limpieza de vídeos vacíos/negros vía OpenCV).
 2. **`set-stream-info`**: Configura título, descripción y categoría del directo en Twitch/YouTube mediante API/OBS frontend tools.
-3. **`set-animation-on-twitch-subscribe`**: Dispara alertas visuales/animaciones o cambia de escena/fuente cuando entra una nueva suscripción de Twitch.
-4. **`set-text-on-twitch-chat`**: Envía mensajes automáticos al chat de Twitch o actualiza fuentes de texto en OBS según eventos de chat.
+3. **`twitch-event-actions`**: Motor unificado para eventos de Twitch en OBS, con paneles iniciales para Chat y Suscripciones.
 
 ## Instalación
 
