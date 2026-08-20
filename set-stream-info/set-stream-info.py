@@ -116,6 +116,7 @@ def open_manual_token_generator(properties=None, property=None):
 
 def script_properties():
     props = obs.obs_properties_create()
+    obs.obs_properties_add_bool(props, "enabled", "✅ Plugin Activo")
     
     active_scene = get_active_scene_name()
     t_saved, c_saved = get_scene_data_from_obs(_script_settings, active_scene)
@@ -177,6 +178,7 @@ def script_properties():
     return props
 
 def script_defaults(settings):
+    obs.obs_data_set_default_bool(settings, "enabled", True)
     obs.obs_data_set_default_string(settings, "global_suffix", ". No commentary. Bring your own music.")
     obs.obs_data_set_default_bool(settings,   "block_if_streaming", False)
     obs.obs_data_set_default_int(settings,    "update_mode", 1)
@@ -195,12 +197,13 @@ def run_proactive_refresh():
     refresh_twitch_token()
 
 def script_update(settings):
-    global block_if_streaming, update_mode, delay_seconds, global_suffix
+    global enabled, block_if_streaming, update_mode, delay_seconds, global_suffix
     global current_scene_title, current_scene_category
     global broadcaster_id, twitch_client_id, twitch_client_secret, twitch_oauth_token, twitch_refresh_token, twitch_scopes
     global _script_settings, is_first_load
     
     _script_settings = settings
+    enabled          = obs.obs_data_get_bool(settings, "enabled")
     active_scene = get_active_scene_name()
 
     global_suffix = obs.obs_data_get_string(settings, "global_suffix")
@@ -273,6 +276,8 @@ def strip_leading_emojis(s):
 
 def execute_stream_info_update(update_category=True):
     """Ejecuta la actualización de la información según la escena activa."""
+    if not enabled:
+        return
     obs.timer_remove(execute_stream_info_update)
     
     is_streaming = obs.obs_frontend_streaming_active()
@@ -560,6 +565,8 @@ def handle_scene_changed():
         obs.script_log(obs.LOG_INFO, f"[Set-Stream-Info] Cambio a escena '{active_scene}' detectado. Programado en {delay_seconds}s...")
 
 def on_event(event):
+    if not enabled:
+        return
     if event == obs.OBS_FRONTEND_EVENT_SCENE_CHANGED:
         handle_scene_changed()
 

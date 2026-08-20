@@ -40,6 +40,7 @@ def script_description():
 
 def script_properties():
     props = obs.obs_properties_create()
+    obs.obs_properties_add_bool(props, "enabled", "✅ Plugin Activo")
 
     # --- Grupo Conexión Twitch ---
     twitch_props = obs.obs_properties_create()
@@ -92,6 +93,7 @@ def script_properties():
 
 
 def script_defaults(settings):
+    obs.obs_data_set_default_bool(settings, "enabled", True)
     obs.obs_data_set_default_string(settings, "client_id", "")
     obs.obs_data_set_default_string(settings, "oauth_token", "")
     obs.obs_data_set_default_string(settings, "refresh_token", "")
@@ -110,12 +112,13 @@ def script_defaults(settings):
 
 
 def script_update(settings):
-    global _script_settings
+    global enabled, _script_settings
     global client_id, oauth_token, refresh_token, broadcaster_id, chat_channel
     global chat_enabled, chat_target_type, chat_target_source, chat_duration
     global subscriptions_enabled, sub_target_type, sub_target_source, sub_duration
 
     _script_settings = settings
+    enabled = obs.obs_data_get_bool(settings, "enabled")
     client_id = obs.obs_data_get_string(settings, "client_id").strip()
     oauth_token = obs.obs_data_get_string(settings, "oauth_token").strip()
     refresh_token = obs.obs_data_get_string(settings, "refresh_token").strip()
@@ -266,6 +269,8 @@ def trigger_event_action(action_type, target_source, duration, text_payload=""):
 # --- Handlers de prueba manuales ---
 
 def on_test_chat(properties, property):
+    if not enabled:
+        return True
     obs.script_log(obs.LOG_INFO, "Probando acción de chat...")
     trigger_event_action(
         chat_target_type,
@@ -277,6 +282,8 @@ def on_test_chat(properties, property):
 
 
 def on_test_subscription(properties, property):
+    if not enabled:
+        return True
     obs.script_log(obs.LOG_INFO, "Probando acción de suscripción...")
     trigger_event_action(
         sub_target_type,

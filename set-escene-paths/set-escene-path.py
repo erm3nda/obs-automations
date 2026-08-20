@@ -22,6 +22,7 @@ except ImportError:
     _has_opencv = False
 
 # ─── Config defaults ──────────────────────────────────────────────────────────
+enabled              = True
 base_folder          = ""      # debe configurarse en el plugin antes de funcionar
 base_filename_format = ""
 keep_recording       = False
@@ -88,6 +89,8 @@ def script_description():
 
 def script_properties():
     props = obs.obs_properties_create()
+    obs.obs_properties_add_bool(props, "enabled", "✅ Plugin Activo")
+
     horizontal_props = obs.obs_properties_create()
     obs.obs_properties_add_path(
         horizontal_props, "base_folder", "Carpeta de grabación",
@@ -170,6 +173,7 @@ def script_properties():
     return props
 
 def script_defaults(settings):
+    obs.obs_data_set_default_bool(settings, "enabled", True)
     obs.obs_data_set_default_string(settings, "base_folder", "")
     obs.obs_data_set_default_string(settings, "base_filename_format", "")
     obs.obs_data_set_default_bool(settings, "keep_recording",       False)
@@ -188,7 +192,7 @@ def script_defaults(settings):
     obs.obs_data_set_default_int(settings,  "vertical_cleanup_threshold", 90)
 
 def script_update(settings):
-    global base_folder, keep_recording, auto_start_recording, auto_start_replay
+    global enabled, base_folder, keep_recording, auto_start_recording, auto_start_replay
     global apply_vertical_paths
     global auto_start_vertical_recording, auto_start_vertical_backtrack
     global keep_vertical_recording
@@ -196,6 +200,7 @@ def script_update(settings):
     global enable_cleanup, min_size_mb, cleanup_threshold
     global enable_vertical_cleanup, vertical_min_size_mb, vertical_cleanup_threshold
     global _current_recording_folder, base_filename_format
+    enabled              = obs.obs_data_get_bool(settings, "enabled")
     val = obs.obs_data_get_string(settings, "base_folder")
     base_folder          = val if val else ""
     keep_recording       = obs.obs_data_get_bool(settings, "keep_recording")
@@ -914,6 +919,8 @@ def _deferred_restart():
 # ─── Evento de cambio de escena ───────────────────────────────────────────────
 
 def handle_scene_changed():
+    if not enabled:
+        return
     """
     Al cambiar de escena:
       1. Obtiene el nombre de la escena activa de OBS.
