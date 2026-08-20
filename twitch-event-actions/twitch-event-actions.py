@@ -75,7 +75,7 @@ def script_properties():
         chat_props, "chat_target_source", "Fuente/Escena de Chat",
         obs.OBS_COMBO_TYPE_EDITABLE, obs.OBS_COMBO_FORMAT_STRING
     )
-    obs.obs_properties_add_int(chat_props, "chat_max_lines", "Número máximo de líneas", 1, 50, 1)
+    obs.obs_properties_add_int(chat_props, "chat_max_messages", "Número máximo de mensajes", 1, 50, 1)
     obs.obs_properties_add_int(chat_props, "chat_max_chars", "Máximo caracteres por línea (Wrap)", 10, 200, 1)
     obs.obs_properties_add_int(chat_props, "chat_duration", "Ocultar / Borrar tras (segundos)", 1, 300, 1)
     obs.obs_properties_add_button(chat_props, "test_chat_button", "▶ Probar Acción Chat", on_test_chat)
@@ -104,13 +104,13 @@ def script_defaults(settings):
     obs.obs_data_set_default_bool(settings, "chat_enabled", False)
     obs.obs_data_set_default_int(settings, "chat_target_type", 0)
     obs.obs_data_set_default_string(settings, "chat_target_source", "twitch_chat")
-    obs.obs_data_set_default_int(settings, "chat_max_lines", 4)
+    obs.obs_data_set_default_int(settings, "chat_max_messages", 5)
     obs.obs_data_set_default_int(settings, "chat_max_chars", 40)
-    obs.obs_data_set_default_int(settings, "chat_duration", 5)
+    obs.obs_data_set_default_int(settings, "chat_duration", 20)
 
 def script_update(settings):
     global enabled, _script_settings, client_id, oauth_token, refresh_token, twitch_scopes, broadcaster_id, chat_channel
-    global chat_enabled, chat_target_type, chat_target_source, chat_max_lines, chat_max_chars, chat_duration
+    global chat_enabled, chat_target_type, chat_target_source, chat_max_messages, chat_max_chars, chat_duration
 
     _script_settings = settings
     enabled = obs.obs_data_get_bool(settings, "enabled")
@@ -124,7 +124,7 @@ def script_update(settings):
     chat_enabled = obs.obs_data_get_bool(settings, "chat_enabled")
     chat_target_type = obs.obs_data_get_int(settings, "chat_target_type")
     chat_target_source = obs.obs_data_get_string(settings, "chat_target_source").strip()
-    chat_max_lines = obs.obs_data_get_int(settings, "chat_max_lines")
+    chat_max_messages = obs.obs_data_get_int(settings, "chat_max_messages")
     chat_max_chars = obs.obs_data_get_int(settings, "chat_max_chars")
     chat_duration = obs.obs_data_get_int(settings, "chat_duration")
 
@@ -189,23 +189,22 @@ def _render_and_schedule_prune(source_name, duration_seconds):
     now = time.time()
     _chat_message_history = [(ts, msg) for (ts, msg) in _chat_message_history if (now - ts) < duration_seconds]
     
-    # Construir texto final aplicando envoltura (wrap) y límite de líneas total
-    all_lines = []
-    for _, msg in _chat_message_history:
-        wrapped = textwrap.wrap(msg, width=chat_max_chars if chat_max_chars > 0 else 40)
-        if not wrapped:
-            wrapped = [msg]
-        all_lines.extend(wrapped)
+    # Limitar por número máximo de MENSAJES (chat_max_messages)
+    active_history = _chat_message_history[-chat_max_messages:] if chat_max_messages > 0 else _chat_message_history
     
-    # Respetar el límite global de líneas configurado
-    if len(all_lines) > chat_max_lines:
-        all_lines = all_lines[-chat_max_lines:]
-        
-    combined_text = "\n".join(all_lines)
+    max_c = chat_max_chars if chat_max_chars > 0 else 40
+    all_messages_blocks = []
+    
+    for _, msg in active_history:
+        # Dividir cada mensaje manualmente en fragmentos según chat_max_chars
+        chunks = [msg[i:i+max_c] for i in range(0, len(msg), max_c)]
+        if chunks:
+            all_messages_blocks.append("\n".join(chunks))
+            
+    # Unir los bloques de mensajes con una línea en blanco de separación
+    combined_text = "\n\n".join(all_messages_blocks)
     _update_source_text(source_name, combined_text)
     
-    # En lugar de recrear un timer individual por cada mensaje que genera fugas o solapamientos en OBS,
-    # utilizamos un único timer de refresco/prune por fuente o verificamos si ya existe antes de añadir otro.
     if source_name in _active_hide_timers:
         try:
             obs.timer_remove(_active_hide_timers[source_name])
@@ -217,7 +216,6 @@ def _render_and_schedule_prune(source_name, duration_seconds):
         oldest_ts = _chat_message_history[0][0]
         time_left = max(0.2, duration_seconds - (now - oldest_ts))
         
-        # Guardamos una referencia estática o limpia al callback
         def _prune_cb():
             try:
                 obs.timer_remove(_prune_cb)
@@ -252,7 +250,7 @@ def _schedule_auto_hide(source_name, action_type, duration_seconds):
     obs.timer_add(_hide_callback, duration_seconds * 1000)
 
 def trigger_event_action(action_type, target_source, duration, text_payload=""):
-    if action_type == 0: _append_chat_message(target_source, text_payload, duration, chat_max_lines)
+    if action_type == 0: _append_chat_message(target_source, text_payload, duration, chat_max_messages)
     elif action_type == 1:
         _set_source_visibility(target_source, True)
         _schedule_auto_hide(target_source, action_type, duration)
