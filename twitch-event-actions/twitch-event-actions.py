@@ -233,26 +233,44 @@ def _update_source_text(source_name, text):
     obs.obs_source_release(source)
 
 
-def _prune_expired_chat_messages():
-    """Elimina mensajes con más de 5 minutos (300 s) si no ha habido actividad."""
+def _prune_expired_chat_messages(duration_seconds):
+    """Elimina mensajes cuyo tiempo de vida haya superado los segundos configurados."""
     global _chat_message_history
     current_now = time.time()
+    max_age = duration_seconds if duration_seconds > 0 else 300
     _chat_message_history = [
         (ts, msg) for (ts, msg) in _chat_message_history
-        if (current_now - ts) < 300
+        if (current_now - ts) < max_age
     ]
 
 
-def _append_chat_message(source_name, new_msg):
-    """Añade un mensaje a la lista acumulativa de hasta 4 mensajes."""
+def _append_chat_message(source_name, new_msg, duration_seconds):
+    """Añade un mensaje a la lista acumulativa de hasta 4 mensajes respetando el tiempo de expiración."""
     global _chat_message_history
-    _prune_expired_chat_messages()
+    _prune_expired_chat_messages(duration_seconds)
     _chat_message_history.append((time.time(), new_msg))
     if len(_chat_message_history) > 4:
         _chat_message_history = _chat_message_history[-4:]
     
     combined_text = "\n".join(msg for _, msg in _chat_message_history)
     _update_source_text(source_name, combined_text)
+
+    # Programar temporizador para forzar la actualización/limpieza cuando expire el más antiguo
+    if _chat_message_history and duration_seconds > 0:
+        if source_name in _active_hide_timers:
+            obs.timer_remove(_active_hide_timers[source_name])
+            del _active_hide_timers[source_name]
+
+        def _chat_prune_timer_cb():
+            if source_name in _active_hide_timers:
+                obs.timer_remove(_active_hide_timers[source_name])
+                del _active_hide_timers[source_name]
+            _prune_expired_chat_messages(duration_seconds)
+            updated_text = "\n".join(msg for _, msg in _chat_message_history)
+            _update_source_text(source_name, updated_text)
+
+        _active_hide_timers[source_name] = _chat_prune_timer_cb
+        obs.timer_add(_chat_prune_timer_cb, duration_seconds * 1000)
 
 
 def _set_source_visibility(source_name, visible):
@@ -303,8 +321,8 @@ def trigger_event_action(action_type, target_source, duration, text_payload=""):
         obs.script_log(obs.LOG_WARNING, "Twitch Event Actions: No se ha especificado fuente de destino.")
         return
 
-    if action_type == 0:  # Lista de mensajes de chat acumulativa
-        _append_chat_message(target_source, text_payload)
+    if action_type == 0:  # Lista de mensajes de chat acumulativa con temporizador por duración
+        _append_chat_message(target_source, text_payload, duration)
     elif action_type == 1:  # Mostrar/Ocultar Visibilidad
         _set_source_visibility(target_source, True)
         _schedule_auto_hide(target_source, action_type, duration)
