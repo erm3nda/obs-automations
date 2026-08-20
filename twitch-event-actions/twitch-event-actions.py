@@ -262,9 +262,7 @@ def _append_chat_message(source_name, new_msg, duration_seconds):
             del _active_hide_timers[source_name]
 
         def _chat_prune_timer_cb():
-            if source_name in _active_hide_timers:
-                obs.timer_remove(_active_hide_timers[source_name])
-                del _active_hide_timers[source_name]
+            # No eliminamos el timer aquí para permitir limpiezas continuas
             _prune_expired_chat_messages(duration_seconds)
             updated_text = "\n".join(msg for _, msg in _chat_message_history)
             _update_source_text(source_name, updated_text)
