@@ -7,6 +7,7 @@ import re
 import urllib.request
 import json
 import webbrowser
+import textwrap
 
 # --- Variables Globales ---
 _script_settings = None
@@ -30,6 +31,7 @@ chat_enabled = False
 chat_target_type = 0
 chat_target_source = "twitch_chat"
 chat_max_lines = 4
+chat_max_chars = 40
 chat_duration = 5
 
 subscriptions_enabled = False
@@ -74,6 +76,7 @@ def script_properties():
         obs.OBS_COMBO_TYPE_EDITABLE, obs.OBS_COMBO_FORMAT_STRING
     )
     obs.obs_properties_add_int(chat_props, "chat_max_lines", "Número máximo de líneas", 1, 50, 1)
+    obs.obs_properties_add_int(chat_props, "chat_max_chars", "Máximo caracteres por línea (Wrap)", 10, 200, 1)
     obs.obs_properties_add_int(chat_props, "chat_duration", "Ocultar / Borrar tras (segundos)", 1, 300, 1)
     obs.obs_properties_add_button(chat_props, "test_chat_button", "▶ Probar Acción Chat", on_test_chat)
     
@@ -102,11 +105,12 @@ def script_defaults(settings):
     obs.obs_data_set_default_int(settings, "chat_target_type", 0)
     obs.obs_data_set_default_string(settings, "chat_target_source", "twitch_chat")
     obs.obs_data_set_default_int(settings, "chat_max_lines", 4)
+    obs.obs_data_set_default_int(settings, "chat_max_chars", 40)
     obs.obs_data_set_default_int(settings, "chat_duration", 5)
 
 def script_update(settings):
     global enabled, _script_settings, client_id, oauth_token, refresh_token, twitch_scopes, broadcaster_id, chat_channel
-    global chat_enabled, chat_target_type, chat_target_source, chat_max_lines, chat_duration
+    global chat_enabled, chat_target_type, chat_target_source, chat_max_lines, chat_max_chars, chat_duration
 
     _script_settings = settings
     enabled = obs.obs_data_get_bool(settings, "enabled")
@@ -121,6 +125,7 @@ def script_update(settings):
     chat_target_type = obs.obs_data_get_int(settings, "chat_target_type")
     chat_target_source = obs.obs_data_get_string(settings, "chat_target_source").strip()
     chat_max_lines = obs.obs_data_get_int(settings, "chat_max_lines")
+    chat_max_chars = obs.obs_data_get_int(settings, "chat_max_chars")
     chat_duration = obs.obs_data_get_int(settings, "chat_duration")
 
     _restart_irc_listener()
@@ -171,12 +176,8 @@ def on_get_broadcaster_id(properties, property):
 
 def _update_source_text(source_name, text):
     if not source_name: return
-    # Asegurarnos de que estamos en el hilo principal
     source = obs.obs_get_source_by_name(source_name)
-    if not source:
-        obs.script_log(obs.LOG_WARNING, f"Fuente no encontrada: {source_name}")
-        return
-    
+    if not source: return
     settings = obs.obs_source_get_settings(source)
     obs.obs_data_set_string(settings, "text", str(text))
     obs.obs_source_update(source, settings)
@@ -187,8 +188,24 @@ def _render_and_schedule_prune(source_name, duration_seconds):
     global _chat_message_history
     now = time.time()
     _chat_message_history = [(ts, msg) for (ts, msg) in _chat_message_history if (now - ts) < duration_seconds]
-    _update_source_text(source_name, "\n".join(msg for _, msg in _chat_message_history))
     
+    # Construir texto final aplicando envoltura (wrap) y límite de líneas total
+    all_lines = []
+    for _, msg in _chat_message_history:
+        wrapped = textwrap.wrap(msg, width=chat_max_chars if chat_max_chars > 0 else 40)
+        if not wrapped:
+            wrapped = [msg]
+        all_lines.extend(wrapped)
+    
+    # Respetar el límite global de líneas configurado
+    if len(all_lines) > chat_max_lines:
+        all_lines = all_lines[-chat_max_lines:]
+        
+    combined_text = "\n".join(all_lines)
+    _update_source_text(source_name, combined_text)
+    
+    # En lugar de recrear un timer individual por cada mensaje que genera fugas o solapamientos en OBS,
+    # utilizamos un único timer de refresco/prune por fuente o verificamos si ya existe antes de añadir otro.
     if source_name in _active_hide_timers:
         try:
             obs.timer_remove(_active_hide_timers[source_name])
@@ -198,7 +215,9 @@ def _render_and_schedule_prune(source_name, duration_seconds):
 
     if _chat_message_history and duration_seconds > 0:
         oldest_ts = _chat_message_history[0][0]
-        time_left = max(0.1, duration_seconds - (now - oldest_ts))
+        time_left = max(0.2, duration_seconds - (now - oldest_ts))
+        
+        # Guardamos una referencia estática o limpia al callback
         def _prune_cb():
             try:
                 obs.timer_remove(_prune_cb)
@@ -214,8 +233,6 @@ def _render_and_schedule_prune(source_name, duration_seconds):
 def _append_chat_message(source_name, new_msg, duration_seconds, max_lines):
     global _chat_message_history
     _chat_message_history.append((time.time(), new_msg))
-    if len(_chat_message_history) > max_lines:
-        _chat_message_history = _chat_message_history[-max_lines:]
     _render_and_schedule_prune(source_name, duration_seconds)
 
 def _set_source_visibility(source_name, visible):
@@ -281,13 +298,22 @@ def _irc_worker_loop():
                 lines = buffer.split("\r\n")
                 buffer = lines.pop()
                 for line in lines:
-                    if line.startswith("PING"): _irc_socket.sendall(line.replace("PING", "PONG").encode() + b"\\r\\n")
+                    if line.startswith("PING"): 
+                        try:
+                            _irc_socket.sendall(line.replace("PING", "PONG").encode() + b"\r\n")
+                        except:
+                            pass
+                        continue
                     match = re.match(r"^:([^!]+)![^ ]+ PRIVMSG #[^ ]+ :(.+)$", line)
-                    if match: _chat_queue.append(f"{match.group(1)}: {match.group(2)}")
-        except: time.sleep(5)
+                    if match: 
+                        _chat_queue.append(f"{match.group(1)}: {match.group(2)}")
+        except: 
+            time.sleep(5)
 
 def on_test_chat(props, prop):
-    _chat_queue.append("UsuarioTest: Mensaje de prueba")
+    global _test_msg_counter
+    _chat_queue.append(f"UsuarioTest_{_test_msg_counter}: Este es un mensaje de prueba bastante largo para verificar el ajuste automático de caracteres y líneas en el panel de OBS.")
+    _test_msg_counter += 1
     return True
 
 def script_load(settings):
