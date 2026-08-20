@@ -1,75 +1,71 @@
 import obspython as obs
-import json
-import urllib.request
-import urllib.error
-import webbrowser
+import threading
+import socket
+import ssl
 import time
+import re
+import urllib.request
+import json
+import webbrowser
 
-# Shared Twitch connection settings
+# --- Variables Globales ---
+_script_settings = None
+_irc_stop_event = threading.Event()
+_irc_thread = None
+_irc_socket = None
+_active_hide_timers = {}
+_chat_message_history = []
+_test_msg_counter = 0
+
+# Variables de configuración
+enabled = True
 client_id = ""
 oauth_token = ""
 refresh_token = ""
+twitch_scopes = "channel:manage:broadcast user:read:chat"
 broadcaster_id = ""
 chat_channel = ""
 
-# Chat action settings
 chat_enabled = False
-chat_target_type = 0  # 0: Lista de mensajes de chat, 1: Mostrar/Ocultar Fuente o Escena, 2: Texto estático único
-chat_target_source = ""
-chat_duration = 5
+chat_target_type = 0
+chat_target_source = "twitch_chat"
 chat_max_lines = 4
+chat_duration = 5
 
-# Subscription action settings
 subscriptions_enabled = False
-sub_target_type = 1   # 0: Texto estático único, 1: Mostrar/Ocultar Fuente o Escena
-sub_target_source = ""
+sub_target_type = 1
+sub_target_source = "twitch_subscription"
 sub_duration = 5
 
-_script_settings = None
-
-# Historial de mensajes de chat con timestamps: list of (timestamp, formatted_text)
-_chat_message_history = []
-_test_msg_counter = 1
-
-# Dynamic active timers dictionary to manage hide timeouts safely
-# Key: source_name (str), Value: timer_callback
-_active_hide_timers = {}
-
+# Cola segura para despacho entre hilos
+_chat_queue = []
 
 def script_description():
-    return (
-        "<b>Twitch Event Actions</b><br>"
-        "Motor flexible de eventos para Twitch con acciones en OBS.<br><br>"
-        "Configura la conexión de Twitch y personaliza cada acción (visibilidad o texto) y su duración."
-    )
-
+    return "Twitch Event Actions: Automatiza acciones en OBS basadas en eventos de Twitch."
 
 def script_properties():
     props = obs.obs_properties_create()
-    obs.obs_properties_add_bool(props, "enabled", "✅ Plugin Activo")
-
-    # --- Grupo Conexión Twitch ---
-    twitch_props = obs.obs_properties_create()
-    obs.obs_properties_add_text(twitch_props, "client_id", "Twitch Client ID", obs.OBS_TEXT_DEFAULT)
-    obs.obs_properties_add_text(twitch_props, "oauth_token", "Twitch OAuth Token", obs.OBS_TEXT_PASSWORD)
-    obs.obs_properties_add_text(twitch_props, "refresh_token", "Twitch Refresh Token", obs.OBS_TEXT_PASSWORD)
-    obs.obs_properties_add_text(twitch_props, "broadcaster_id", "Broadcaster ID (auto)", obs.OBS_TEXT_DEFAULT)
-    obs.obs_properties_add_text(twitch_props, "chat_channel", "Canal de chat", obs.OBS_TEXT_DEFAULT)
-    obs.obs_properties_add_button(twitch_props, "refresh_token_button", "Refrescar token", on_refresh_token)
-    obs.obs_properties_add_button(twitch_props, "broadcaster_id_button", "Obtener Broadcaster ID", on_get_broadcaster_id)
-    obs.obs_properties_add_button(twitch_props, "generate_token_button", "Abrir generador de token", on_generate_token)
+    obs.obs_properties_add_bool(props, "enabled", "Activar Script")
     
-    obs.obs_properties_add_group(props, "twitch_connection", "🔐 Conexión Twitch", obs.OBS_GROUP_NORMAL, twitch_props)
+    # Auth Group
+    auth_props = obs.obs_properties_create()
+    obs.obs_properties_add_text(auth_props, "client_id", "Twitch Client ID", obs.OBS_TEXT_DEFAULT)
+    obs.obs_properties_add_text(auth_props, "oauth_token", "Twitch OAuth Token", obs.OBS_TEXT_PASSWORD)
+    obs.obs_properties_add_text(auth_props, "refresh_token", "Twitch Refresh Token", obs.OBS_TEXT_PASSWORD)
+    obs.obs_properties_add_text(auth_props, "twitch_scopes", "Scopes", obs.OBS_TEXT_DEFAULT)
+    obs.obs_properties_add_button(auth_props, "generate_token", "Generar Token (Navegador)", on_generate_token)
+    obs.obs_properties_add_button(auth_props, "refresh_token_btn", "Refrescar Token", on_refresh_token)
+    obs.obs_properties_add_button(auth_props, "get_id_button", "Detectar ID y Canal", on_get_broadcaster_id)
+    obs.obs_properties_add_group(props, "auth_group", "Configuración Twitch", obs.OBS_GROUP_NORMAL, auth_props)
 
-    # --- Grupo Chat Actions ---
+    # Chat Group
     chat_props = obs.obs_properties_create()
-    obs.obs_properties_add_bool(chat_props, "chat_enabled", "Activar eventos de chat")
-    
+    obs.obs_properties_add_bool(chat_props, "chat_enabled", "Activar Chat")
     p_chat_type = obs.obs_properties_add_list(
         chat_props, "chat_target_type", "Tipo de Acción Chat",
         obs.OBS_COMBO_TYPE_LIST, obs.OBS_COMBO_FORMAT_INT
     )
-    obs.obs_property_list_add_int(p_chat_type, "Lista acumulativa de mensajes de chat", 0)
+    obs.obs_property_list_add_int(p_chat_type, "Lista de chat acumulativa", 0)
     obs.obs_property_list_add_int(p_chat_type, "Mostrar/Ocultar Fuente o Escena", 1)
     obs.obs_property_list_add_int(p_chat_type, "Actualizar Texto único", 2)
 
@@ -77,49 +73,28 @@ def script_properties():
         chat_props, "chat_target_source", "Fuente/Escena de Chat",
         obs.OBS_COMBO_TYPE_EDITABLE, obs.OBS_COMBO_FORMAT_STRING
     )
-    obs.obs_properties_add_int(chat_props, "chat_max_lines", "Número máximo de líneas en chat", 1, 20, 1)
-    obs.obs_properties_add_int(chat_props, "chat_duration", "Tiempo de permanencia por mensaje (segundos)", 1, 300, 1)
-    obs.obs_properties_add_button(chat_props, "test_chat_button", "▶ Añadir mensaje de chat simulado", on_test_chat)
+    obs.obs_properties_add_int(chat_props, "chat_max_lines", "Número máximo de líneas", 1, 50, 1)
+    obs.obs_properties_add_int(chat_props, "chat_duration", "Ocultar / Borrar tras (segundos)", 1, 300, 1)
+    obs.obs_properties_add_button(chat_props, "test_chat_button", "▶ Probar Acción Chat", on_test_chat)
     
-    obs.obs_properties_add_group(props, "chat_actions", "💬 Evento: Chat", obs.OBS_GROUP_NORMAL, chat_props)
-
-    # --- Grupo Subscriptions Actions ---
-    sub_props = obs.obs_properties_create()
-    obs.obs_properties_add_bool(sub_props, "subscriptions_enabled", "Activar eventos de suscripción")
-    
-    p_sub_type = obs.obs_properties_add_list(
-        sub_props, "sub_target_type", "Tipo de Acción Suscripción",
-        obs.OBS_COMBO_TYPE_LIST, obs.OBS_COMBO_FORMAT_INT
-    )
-    obs.obs_property_list_add_int(p_sub_type, "Actualizar Texto de Fuente", 0)
-    obs.obs_property_list_add_int(p_sub_type, "Mostrar/Ocultar Fuente o Escena", 1)
-
-    p_sub_source = obs.obs_properties_add_list(
-        sub_props, "sub_target_source", "Fuente/Escena de Suscripción",
-        obs.OBS_COMBO_TYPE_EDITABLE, obs.OBS_COMBO_FORMAT_STRING
-    )
-
-    # Rellenar listas de fuentes desde OBS
+    # Rellenar fuentes
     sources = obs.obs_enum_sources()
     if sources is not None:
         for source in sources:
             name = obs.obs_source_get_name(source)
             obs.obs_property_list_add_string(p_chat_source, name, name)
-            obs.obs_property_list_add_string(p_sub_source, name, name)
         obs.source_list_release(sources)
-    obs.obs_properties_add_int(sub_props, "sub_duration", "Ocultar / Borrar tras (segundos)", 1, 300, 1)
-    obs.obs_properties_add_button(sub_props, "test_sub_button", "▶ Probar Acción Suscripción", on_test_subscription)
     
-    obs.obs_properties_add_group(props, "sub_actions", "⭐ Evento: Suscripciones", obs.OBS_GROUP_NORMAL, sub_props)
-
+    obs.obs_properties_add_group(props, "chat_actions", "⭐ Evento: Chat", obs.OBS_GROUP_NORMAL, chat_props)
+    
     return props
-
 
 def script_defaults(settings):
     obs.obs_data_set_default_bool(settings, "enabled", True)
     obs.obs_data_set_default_string(settings, "client_id", "")
     obs.obs_data_set_default_string(settings, "oauth_token", "")
     obs.obs_data_set_default_string(settings, "refresh_token", "")
+    obs.obs_data_set_default_string(settings, "twitch_scopes", "channel:manage:broadcast user:read:chat")
     obs.obs_data_set_default_string(settings, "broadcaster_id", "")
     obs.obs_data_set_default_string(settings, "chat_channel", "")
     
@@ -129,23 +104,16 @@ def script_defaults(settings):
     obs.obs_data_set_default_int(settings, "chat_max_lines", 4)
     obs.obs_data_set_default_int(settings, "chat_duration", 5)
 
-    obs.obs_data_set_default_bool(settings, "subscriptions_enabled", False)
-    obs.obs_data_set_default_int(settings, "sub_target_type", 1)
-    obs.obs_data_set_default_string(settings, "sub_target_source", "twitch_subscription")
-    obs.obs_data_set_default_int(settings, "sub_duration", 5)
-
-
 def script_update(settings):
-    global enabled, _script_settings
-    global client_id, oauth_token, refresh_token, broadcaster_id, chat_channel
-    global chat_enabled, chat_target_type, chat_target_source, chat_duration
-    global subscriptions_enabled, sub_target_type, sub_target_source, sub_duration
+    global enabled, _script_settings, client_id, oauth_token, refresh_token, twitch_scopes, broadcaster_id, chat_channel
+    global chat_enabled, chat_target_type, chat_target_source, chat_max_lines, chat_duration
 
     _script_settings = settings
     enabled = obs.obs_data_get_bool(settings, "enabled")
     client_id = obs.obs_data_get_string(settings, "client_id").strip()
     oauth_token = obs.obs_data_get_string(settings, "oauth_token").strip()
     refresh_token = obs.obs_data_get_string(settings, "refresh_token").strip()
+    twitch_scopes = obs.obs_data_get_string(settings, "twitch_scopes").strip()
     broadcaster_id = obs.obs_data_get_string(settings, "broadcaster_id").strip()
     chat_channel = obs.obs_data_get_string(settings, "chat_channel").strip().lstrip("#")
 
@@ -155,230 +123,177 @@ def script_update(settings):
     chat_max_lines = obs.obs_data_get_int(settings, "chat_max_lines")
     chat_duration = obs.obs_data_get_int(settings, "chat_duration")
 
-    subscriptions_enabled = obs.obs_data_get_bool(settings, "subscriptions_enabled")
-    sub_target_type = obs.obs_data_get_int(settings, "sub_target_type")
-    sub_target_source = obs.obs_data_get_string(settings, "sub_target_source").strip()
-    sub_duration = obs.obs_data_get_int(settings, "sub_duration")
-
+    _restart_irc_listener()
 
 def on_refresh_token(properties, property):
-    global oauth_token, refresh_token
-    if not refresh_token or not client_id:
-        obs.script_log(obs.LOG_WARNING, "Twitch Event Actions: faltan Refresh Token o Client ID.")
+    global oauth_token, refresh_token, client_id
+    if not refresh_token:
         return True
-    url = "https://twitchtokengenerator.com/api/refresh/{}".format(refresh_token)
+    url = "https://twitchtokengenerator.com/api/refresh/{}".format(refresh_token.strip())
     try:
-        with urllib.request.urlopen(urllib.request.Request(url), timeout=15) as response:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as response:
             data = json.loads(response.read().decode("utf-8"))
-        if not data.get("success") or not data.get("token"):
-            obs.script_log(obs.LOG_ERROR, "Twitch Event Actions: no se pudo refrescar el token.")
-            return True
-        oauth_token = data["token"]
-        refresh_token = data.get("refresh", refresh_token)
-        if _script_settings:
-            obs.obs_data_set_string(_script_settings, "oauth_token", oauth_token)
-            obs.obs_data_set_string(_script_settings, "refresh_token", refresh_token)
-        obs.script_log(obs.LOG_INFO, "Twitch Event Actions: token refrescado correctamente.")
-    except (urllib.error.URLError, ValueError) as error:
-        obs.script_log(obs.LOG_ERROR, "Twitch Event Actions: error refrescando token: {}".format(error))
+        if data.get("success"):
+            oauth_token = data["token"]
+            refresh_token = data.get("refresh", refresh_token)
+            if _script_settings:
+                obs.obs_data_set_string(_script_settings, "oauth_token", oauth_token)
+                obs.obs_data_set_string(_script_settings, "refresh_token", refresh_token)
+    except:
+        pass
     return True
-
 
 def on_generate_token(properties, property):
-    scopes = "channel:manage:broadcast%20channel:read:subscriptions%20user:read:chat"
-    url = (
-        "https://id.twitch.tv/oauth2/authorize?response_type=code&"
-        "client_id={}&redirect_uri=https://twitchtokengenerator.com&scope={}"
-    ).format(client_id, scopes)
-    webbrowser.open(url)
+    webbrowser.open("https://twitchtokengenerator.com/")
     return True
 
-
 def on_get_broadcaster_id(properties, property):
-    global broadcaster_id
-    if not client_id or not oauth_token:
-        obs.script_log(obs.LOG_WARNING, "Twitch Event Actions: faltan Client ID o OAuth Token.")
-        return True
+    global broadcaster_id, chat_channel
+    if not client_id or not oauth_token: return True
     request = urllib.request.Request(
         "https://api.twitch.tv/helix/users",
-        headers={
-            "Client-ID": client_id,
-            "Authorization": "Bearer {}".format(oauth_token.replace("oauth:", "").strip())
-        }
+        headers={"Client-ID": client_id, "Authorization": "Bearer {}".format(oauth_token.replace("oauth:", "").strip())}
     )
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
             users = json.loads(response.read().decode("utf-8")).get("data", [])
-        if not users:
-            obs.script_log(obs.LOG_WARNING, "Twitch Event Actions: Twitch no devolvió ningún usuario.")
-            return True
-        broadcaster_id = users[0].get("id", "")
-        if _script_settings:
-            obs.obs_data_set_string(_script_settings, "broadcaster_id", broadcaster_id)
-        obs.script_log(obs.LOG_INFO, "Broadcaster ID obtenido: {}".format(broadcaster_id))
-    except (urllib.error.URLError, ValueError) as error:
-        obs.script_log(obs.LOG_ERROR, "Twitch Event Actions: error obteniendo Broadcaster ID: {}".format(error))
+        if users:
+            broadcaster_id = users[0].get("id", "")
+            chat_channel = users[0].get("login", "")
+            if _script_settings:
+                obs.obs_data_set_string(_script_settings, "broadcaster_id", broadcaster_id)
+                obs.obs_data_set_string(_script_settings, "chat_channel", chat_channel)
+            _restart_irc_listener()
+    except:
+        pass
     return True
 
-
-# --- Funciones Genéricas de Ejecución de Acciones ---
-
 def _update_source_text(source_name, text):
-    if not source_name:
-        return
+    if not source_name: return
+    # Asegurarnos de que estamos en el hilo principal
     source = obs.obs_get_source_by_name(source_name)
     if not source:
-        obs.script_log(obs.LOG_WARNING, "No existe la fuente de texto '{}'.".format(source_name))
+        obs.script_log(obs.LOG_WARNING, f"Fuente no encontrada: {source_name}")
         return
+    
     settings = obs.obs_source_get_settings(source)
-    obs.obs_data_set_string(settings, "text", text)
+    obs.obs_data_set_string(settings, "text", str(text))
     obs.obs_source_update(source, settings)
     obs.obs_data_release(settings)
     obs.obs_source_release(source)
 
-
 def _render_and_schedule_prune(source_name, duration_seconds):
-    """Filtra mensajes expirados del historial, actualiza la fuente de texto y programa el siguiente timer."""
     global _chat_message_history
     now = time.time()
+    _chat_message_history = [(ts, msg) for (ts, msg) in _chat_message_history if (now - ts) < duration_seconds]
+    _update_source_text(source_name, "\n".join(msg for _, msg in _chat_message_history))
     
-    # Filtrar sólo los mensajes que no han superado el tiempo de permanencia
-    _chat_message_history = [
-        (ts, msg) for (ts, msg) in _chat_message_history
-        if (now - ts) < duration_seconds
-    ]
-    
-    # Renderizar el texto uniendo las líneas restantes
-    combined_text = "\n".join(msg for _, msg in _chat_message_history)
-    _update_source_text(source_name, combined_text)
-
-    # Si hay un timer activo anterior para este chat, se elimina
     if source_name in _active_hide_timers:
-        obs.timer_remove(_active_hide_timers[source_name])
+        try:
+            obs.timer_remove(_active_hide_timers[source_name])
+        except Exception:
+            pass
         del _active_hide_timers[source_name]
 
-    # Si aún quedan mensajes en el historial, programamos el siguiente timer justo cuando venza el mensaje más antiguo
     if _chat_message_history and duration_seconds > 0:
-        # Calcular el tiempo de vida restante para el mensaje más antiguo que queda
         oldest_ts = _chat_message_history[0][0]
         time_left = max(0.1, duration_seconds - (now - oldest_ts))
-
         def _prune_cb():
-            # Esta funcion es necesaria porque timer_add requiere una funcion sin argumentos
+            try:
+                obs.timer_remove(_prune_cb)
+            except Exception:
+                pass
+            if source_name in _active_hide_timers:
+                del _active_hide_timers[source_name]
             _render_and_schedule_prune(source_name, duration_seconds)
-
+        
         _active_hide_timers[source_name] = _prune_cb
         obs.timer_add(_prune_cb, int(time_left * 1000))
 
-
 def _append_chat_message(source_name, new_msg, duration_seconds, max_lines):
-    """Añade un mensaje nuevo al final de la cola del historial y actualiza el renderizado."""
     global _chat_message_history
     _chat_message_history.append((time.time(), new_msg))
-    
-    # Limitar al número máximo de líneas configurado
     if len(_chat_message_history) > max_lines:
         _chat_message_history = _chat_message_history[-max_lines:]
-
     _render_and_schedule_prune(source_name, duration_seconds)
 
-
 def _set_source_visibility(source_name, visible):
-    if not source_name:
-        return
-    found = False
     scenes = obs.obs_frontend_get_scenes()
-    if scenes:
-        for sc_src in scenes:
-            scene = obs.obs_scene_from_source(sc_src)
-            if scene:
-                item = obs.obs_scene_find_source(scene, source_name)
-                if item:
-                    obs.obs_sceneitem_set_visible(item, visible)
-                    found = True
-        obs.source_list_release(scenes)
-    if not found:
-        obs.script_log(obs.LOG_WARNING, "No se encontró la fuente/escena '{}' en ninguna escena.".format(source_name))
-
+    for sc_src in scenes:
+        scene = obs.obs_scene_from_source(sc_src)
+        item = obs.obs_scene_find_source(scene, source_name)
+        if item: obs.obs_sceneitem_set_visible(item, visible)
+    obs.source_list_release(scenes)
 
 def _schedule_auto_hide(source_name, action_type, duration_seconds):
-    """Maneja el ocultado / borrado automático después del tiempo especificado."""
-    if not source_name or duration_seconds <= 0:
-        return
-
-    # Limpiar temporizador previo para la misma fuente si existía
-    if source_name in _active_hide_timers:
-        obs.timer_remove(_active_hide_timers[source_name])
-        del _active_hide_timers[source_name]
-
+    if not source_name or duration_seconds <= 0: return
     def _hide_callback():
-        if source_name in _active_hide_timers:
-            obs.timer_remove(_active_hide_timers[source_name])
-            del _active_hide_timers[source_name]
-
-        if action_type == 0:  # Borrar texto
-            _update_source_text(source_name, "")
-        else:  # Ocultar visibilidad
-            _set_source_visibility(source_name, False)
-
-    _active_hide_timers[source_name] = _hide_callback
+        if action_type == 0: _update_source_text(source_name, "")
+        else: _set_source_visibility(source_name, False)
+        obs.timer_remove(_hide_callback)
     obs.timer_add(_hide_callback, duration_seconds * 1000)
 
-
 def trigger_event_action(action_type, target_source, duration, text_payload=""):
-    """Dispara una acción de evento configurable."""
-    if not target_source:
-        obs.script_log(obs.LOG_WARNING, "Twitch Event Actions: No se ha especificado fuente de destino.")
-        return
-
-    if action_type == 0:  # Lista de mensajes de chat acumulativa
-        _append_chat_message(target_source, text_payload, duration, chat_max_lines)
-    elif action_type == 1:  # Mostrar/Ocultar Visibilidad
+    if action_type == 0: _append_chat_message(target_source, text_payload, duration, chat_max_lines)
+    elif action_type == 1:
         _set_source_visibility(target_source, True)
         _schedule_auto_hide(target_source, action_type, duration)
-    elif action_type == 2:  # Actualizar Texto único con auto-borrado
+    elif action_type == 2:
         _update_source_text(target_source, text_payload)
         _schedule_auto_hide(target_source, 0, duration)
 
+def _process_chat_queue():
+    global _chat_queue
+    if _chat_queue:
+        for payload in _chat_queue:
+            trigger_event_action(chat_target_type, chat_target_source, chat_duration, payload)
+        _chat_queue = []
 
-# --- Handlers de prueba manuales ---
+def _restart_irc_listener():
+    global _irc_stop_event, _irc_thread, _irc_socket
+    _irc_stop_event.set()
+    if _irc_thread: _irc_thread.join(timeout=1.0)
+    _irc_stop_event = threading.Event()
+    _irc_thread = threading.Thread(target=_irc_worker_loop, daemon=True)
+    _irc_thread.start()
 
-def on_test_chat(properties, property):
-    global _test_msg_counter
-    if not enabled:
-        return True
-    obs.script_log(obs.LOG_INFO, "Simulando nuevo mensaje de chat...")
-    trigger_event_action(
-        chat_target_type,
-        chat_target_source,
-        chat_duration,
-        "Usuario_{}: Mensaje simulado #{}".format(_test_msg_counter, _test_msg_counter)
-    )
-    _test_msg_counter += 1
+def _irc_worker_loop():
+    global _irc_socket
+    server, port = "irc.chat.twitch.tv", 6697
+    channel_name = chat_channel.lower().lstrip("#")
+    
+    while not _irc_stop_event.is_set():
+        try:
+            raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            raw_sock.settimeout(5.0)
+            _irc_socket = ssl.create_default_context().wrap_socket(raw_sock, server_hostname=server)
+            _irc_socket.connect((server, port))
+            _irc_socket.sendall(f"PASS oauth:{oauth_token.replace('oauth:', '').strip()}\r\n".encode())
+            _irc_socket.sendall(f"NICK justinfan12345\r\n".encode())
+            _irc_socket.sendall(f"JOIN #{channel_name}\r\n".encode())
+            
+            buffer = ""
+            while not _irc_stop_event.is_set():
+                data = _irc_socket.recv(4096).decode("utf-8", errors="ignore")
+                if not data: break
+                buffer += data
+                lines = buffer.split("\r\n")
+                buffer = lines.pop()
+                for line in lines:
+                    if line.startswith("PING"): _irc_socket.sendall(line.replace("PING", "PONG").encode() + b"\\r\\n")
+                    match = re.match(r"^:([^!]+)![^ ]+ PRIVMSG #[^ ]+ :(.+)$", line)
+                    if match: _chat_queue.append(f"{match.group(1)}: {match.group(2)}")
+        except: time.sleep(5)
+
+def on_test_chat(props, prop):
+    _chat_queue.append("UsuarioTest: Mensaje de prueba")
     return True
-
-
-def on_test_subscription(properties, property):
-    if not enabled:
-        return True
-    obs.script_log(obs.LOG_INFO, "Probando acción de suscripción...")
-    trigger_event_action(
-        sub_target_type,
-        sub_target_source,
-        sub_duration,
-        "¡Nuevo suscriptor: UsuarioPrueba!"
-    )
-    return True
-
 
 def script_load(settings):
-    obs.script_log(obs.LOG_INFO, "Twitch Event Actions cargado correctamente.")
-    obs.script_log(obs.LOG_WARNING, "Twitch Event Actions: Nota - La recepción de chat en tiempo real mediante WebSocket/IRC requiere implementar el listener de eventos de Twitch. Actualmente solo están activos los botones de prueba manuales y la configuración.")
-
+    obs.timer_add(_process_chat_queue, 100)
+    script_update(settings)
 
 def script_unload():
-    # Limpiar todos los temporizadores activos al descargar
-    for source_name, timer_cb in list(_active_hide_timers.items()):
-        obs.timer_remove(timer_cb)
-    _active_hide_timers.clear()
-    obs.script_log(obs.LOG_INFO, "Twitch Event Actions descargado y temporizadores limpiados.")
+    _irc_stop_event.set()
+    if _irc_socket: _irc_socket.close()
