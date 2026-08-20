@@ -287,4 +287,12 @@ def script_load(settings):
 
 
 def script_unload():
-    obs.script_log(obs.LOG_INFO, "Twitch Event Actions descargado.")
+    # Limpieza segura de temporizadores al descargar el script
+    if _chat_test_timer:
+        obs.timer_remove(_run_chat_test)
+    if _subscription_test_timer:
+        obs.timer_remove(_run_subscription_test)
+    if _subscription_hide_timer:
+        obs.timer_remove(_hide_subscription_test)
+    
+    obs.script_log(obs.LOG_INFO, "Twitch Event Actions descargado y temporizadores limpiados.")
