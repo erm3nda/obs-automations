@@ -259,10 +259,12 @@ def _render_and_schedule_prune(source_name, duration_seconds):
 
     # Si aún quedan mensajes en el historial, programamos el siguiente timer justo cuando venza el mensaje más antiguo
     if _chat_message_history and duration_seconds > 0:
+        # Calcular el tiempo de vida restante para el mensaje más antiguo que queda
         oldest_ts = _chat_message_history[0][0]
         time_left = max(0.1, duration_seconds - (now - oldest_ts))
 
         def _prune_cb():
+            # Esta funcion es necesaria porque timer_add requiere una funcion sin argumentos
             _render_and_schedule_prune(source_name, duration_seconds)
 
         _active_hide_timers[source_name] = _prune_cb
