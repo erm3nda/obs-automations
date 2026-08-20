@@ -1,0 +1,193 @@
+import sys
+import os
+import json
+import time
+import traceback
+from playwright.sync_api import sync_playwright
+
+def get_paths():
+    home_dir = os.path.expanduser("~")
+    base_dir = os.path.join(home_dir, ".obs_automations")
+    try:
+        os.makedirs(base_dir, exist_ok=True)
+    except Exception:
+        pass
+    profile_dir = os.path.join(base_dir, "playwright_profile")
+    tokens_file = os.path.join(base_dir, "tokens.json")
+    crash_log = os.path.join(base_dir, "crash.log")
+    return profile_dir, tokens_file, crash_log
+
+def run_login():
+    profile_dir, _, _ = get_paths()
+    print("=========================================================")
+    print("  PLAYWRIGHT TWITCH LOGIN - obs-automations")
+    print("=========================================================")
+    print(f"Usando perfil en: {profile_dir}")
+    print("Abriendo el navegador de login (Visible)...")
+    print("Por favor, inicia sesión en tu cuenta de Twitch, resuelve el 2FA")
+    print("y cuando estés en tu página de inicio de Twitch (o panel),")
+    print("CIERRA LA VENTANA DEL NAVEGADOR para terminar.")
+    print("=========================================================")
+    
+    chrome_path = os.environ.get("CHROME_PATH")
+    launch_args = {
+        "user_data_dir": profile_dir,
+        "headless": False,
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "ignore_default_args": ["--enable-automation"],
+        "args": ["--disable-blink-features=AutomationControlled"]
+    }
+    if chrome_path and os.path.exists(chrome_path):
+        launch_args["executable_path"] = chrome_path
+        print(f"Usando ejecutable de Chrome personalizado: {chrome_path}")
+    
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(**launch_args)
+        page = context.new_page()
+        # Ocultar navigator.webdriver en JS
+        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        page.goto("https://twitch.tv/login")
+        
+        # Esperar a que el usuario cierre el navegador
+        while len(context.pages) > 0:
+            try:
+                time.sleep(0.5)
+            except KeyboardInterrupt:
+                break
+        context.close()
+    print("Paso de Login finalizado.")
+
+def run_generate():
+    profile_dir, tokens_file, _ = get_paths()
+    print("=========================================================")
+    print("  PLAYWRIGHT TOKEN GENERATOR - obs-automations")
+    print("=========================================================")
+    
+    # Obtener los scopes pasados por parámetro (con fallback al valor por defecto)
+    scopes = "channel:manage:broadcast"
+    if len(sys.argv) > 2:
+        raw_scopes = sys.argv[2].strip()
+        # Normalizar espacios y saltos de línea para el formato URL
+        scopes = "%20".join([s.strip() for s in raw_scopes.split() if s.strip()])
+    
+    # Eliminar archivo de tokens anterior si existe
+    if os.path.exists(tokens_file):
+        try:
+            os.remove(tokens_file)
+        except Exception:
+            pass
+
+    chrome_path = os.environ.get("CHROME_PATH")
+    launch_args = {
+        "user_data_dir": profile_dir,
+        "headless": True,
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "ignore_default_args": ["--enable-automation"],
+        "args": ["--disable-blink-features=AutomationControlled"]
+    }
+    if chrome_path and os.path.exists(chrome_path):
+        launch_args["executable_path"] = chrome_path
+        print(f"Usando ejecutable de Chrome personalizado (Headless): {chrome_path}")
+
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(**launch_args)
+        page = context.new_page()
+        # Ocultar navigator.webdriver en JS
+        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
+        # URL de autorización con el Client ID oficial de TwitchTokenGenerator
+        client_id = "gp762nuuoqcoxypju8c569th9wz7q5"
+        auth_url = f"https://id.twitch.tv/oauth2/authorize?response_type=code&client_id={client_id}&redirect_uri=https://twitchtokengenerator.com&scope={scopes}"
+        
+        print("Accediendo a la autorización de Twitch de forma invisible...")
+        page.goto(auth_url)
+        
+        # Esperar un momento a que resuelva la página
+        page.wait_for_timeout(3000)
+        
+        # Detectar si nos redirige a la página de login (sesión caducada)
+        if "twitch.tv" in page.url and ("login" in page.url or "passport" in page.url):
+            print("❌ ERROR: El inicio de sesión en Twitch ha caducado o no se ha realizado.")
+            print("           No se puede generar el token de forma invisible.")
+            print("           Por favor, usa la opción '1. Iniciar Sesión en Twitch (Playwright)' en OBS.")
+            context.close()
+            sys.exit(1)
+            
+        if "twitch.tv" in page.url:
+            print("Página de autorización detectada. Intentando autorizar automáticamente...")
+            try:
+                # Buscar el botón de autorizar (Twitch Passport)
+                auth_button = page.locator('button:has-text("Autorizar"), button:has-text("Authorize"), [data-a-target="passport-authorize-button"]')
+                if auth_button.count() > 0:
+                    auth_button.click()
+                    print("✓ Botón de autorizar pulsado automáticamente.")
+            except Exception as e:
+                print(f"No se pudo autorizar automáticamente: {e}")
+
+        # Esperar redirección a twitchtokengenerator.com
+        print("Esperando redirección final a TwitchTokenGenerator...")
+        try:
+            page.wait_for_url("**/twitchtokengenerator.com**", timeout=30000)
+        except Exception:
+            print("❌ ERROR: Tiempo de espera agotado esperando la redirección a twitchtokengenerator.com.")
+            print("           Posiblemente necesites volver a loguearte en Twitch (Paso 1).")
+            context.close()
+            sys.exit(1)
+
+        # Extraer los tokens de los inputs
+        print("Extrayendo tokens...")
+        try:
+            # Esperar a que los inputs estén en la página
+            page.wait_for_selector('xpath=//*[contains(text(), "ACCESS TOKEN") or contains(text(), "Access Token")]/following::input[1]', timeout=10000)
+            
+            access_token = page.locator('xpath=//*[contains(text(), "ACCESS TOKEN") or contains(text(), "Access Token")]/following::input[1]').input_value()
+            refresh_token = page.locator('xpath=//*[contains(text(), "REFRESH TOKEN") or contains(text(), "Refresh Token")]/following::input[1]').input_value()
+            client_id_extracted = page.locator('xpath=//*[contains(text(), "CLIENT ID") or contains(text(), "Client Id")]/following::input[1]').input_value()
+            
+            if access_token and refresh_token:
+                data = {
+                    "twitch_oauth_token": access_token.strip(),
+                    "twitch_refresh_token": refresh_token.strip(),
+                    "twitch_client_id": client_id_extracted.strip() if client_id_extracted else client_id
+                }
+                with open(tokens_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4)
+                print("=========================================================")
+                print("✓ ¡TOKENS GENERADOS Y GUARDADOS CON ÉXITO!")
+                print("=========================================================")
+            else:
+                print("❌ ERROR: No se pudieron leer los valores de los tokens en la web.")
+                sys.exit(1)
+        except Exception as e:
+            print(f"❌ ERROR al extraer los tokens de la web: {e}")
+            sys.exit(1)
+        
+        context.close()
+
+if __name__ == "__main__":
+    try:
+        if len(sys.argv) < 2:
+            print("Uso: python twitch_login.py [--login | --generate]")
+            sys.exit(1)
+            
+        mode = sys.argv[1]
+        if mode == "--login":
+            run_login()
+        elif mode == "--generate":
+            run_generate()
+        else:
+            print(f"Modo desconocido: {mode}")
+            sys.exit(1)
+            
+    except Exception as e:
+        # En caso de crash completo, escribir en crash.log para depuración
+        _, _, crash_log = get_paths()
+        try:
+            with open(crash_log, "w", encoding="utf-8") as f:
+                f.write(traceback.format_exc())
+        except Exception:
+            pass
+        print(f"\n❌ CRITICAL CRASH: {e}")
+        print("Detalles guardados en crash.log. La ventana se cerrará en 10 segundos...")
+        time.sleep(10)
+        sys.exit(1)

@@ -4,11 +4,12 @@
 
 # Verificar si se ejecuta como Administrador, si no, autoelevarse
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
+if (-not $isAdmin -and -not $env:OBS_AUTO_INSTALL_RUNNING) {
     Write-Host "Solicitando permisos de Administrador..." -ForegroundColor Yellow
     Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
+
 
 $scriptName  = "set-escene-path.py"
 $sourceFile  = Join-Path $PSScriptRoot $scriptName

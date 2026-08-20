@@ -1,12 +1,14 @@
 # install.ps1
 # Copia set-animation-on-twitch-subscribe.py al directorio de scripts de OBS Studio.
 
+# Evitar elevación si ya se ejecuta como Admin o se invoca desde el maestro
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
+if (-not $isAdmin -and -not $env:OBS_AUTO_INSTALL_RUNNING) {
     Write-Host "Solicitando permisos de Administrador..." -ForegroundColor Yellow
     Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
+
 
 $scriptName  = "set-animation-on-twitch-subscribe.py"
 $sourceFile  = Join-Path $PSScriptRoot $scriptName

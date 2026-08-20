@@ -1,22 +1,16 @@
 # install.ps1
-# Copia set-stream-info.py al directorio de scripts de OBS Studio.
+# Copia set-stream-info.py y stream_info.json al directorio de scripts de OBS Studio.
 
+# Evitar elevación si ya se ejecuta como Admin o se invoca desde el maestro
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
+if (-not $isAdmin -and -not $env:OBS_AUTO_INSTALL_RUNNING) {
     Write-Host "Solicitando permisos de Administrador..." -ForegroundColor Yellow
     Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
 
-$scriptName  = "set-stream-info.py"
-$sourceFile  = Join-Path $PSScriptRoot $scriptName
-$obsScriptsDir = Join-Path $env:ProgramFiles "obs-studio\data\obs-plugins\frontend-tools\scripts"
-$destination = Join-Path $obsScriptsDir $scriptName
 
-if (-not (Test-Path $sourceFile)) {
-    Write-Error "No se encontro el archivo fuente: $sourceFile"
-    exit 1
-}
+$obsScriptsDir = Join-Path $env:ProgramFiles "obs-studio\data\obs-plugins\frontend-tools\scripts"
 
 if (-not (Test-Path $obsScriptsDir)) {
     Write-Error "No se encontro el directorio de scripts de OBS:`n  $obsScriptsDir`nAsegurate de que OBS Studio esta instalado."
@@ -24,12 +18,20 @@ if (-not (Test-Path $obsScriptsDir)) {
 }
 
 try {
-    Copy-Item -Path $sourceFile -Destination $destination -Force
-    Write-Host "Script copiado correctamente a:" -ForegroundColor Green
-    Write-Host "  $destination" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "En OBS: Herramientas > Scripts > [+] > selecciona '$scriptName'" -ForegroundColor Cyan
+    # Copiar script Python
+    Copy-Item -Path (Join-Path $PSScriptRoot "set-stream-info.py") -Destination (Join-Path $obsScriptsDir "set-stream-info.py") -Force
+    
+    # Copiar archivo stream_info.json si existe
+    $jsonFile = Join-Path $PSScriptRoot "stream_info.json"
+    if (Test-Path $jsonFile) {
+        Copy-Item -Path $jsonFile -Destination (Join-Path $obsScriptsDir "stream_info.json") -Force
+    }
+
+
+
+    Write-Host "Set-Stream-Info instalado correctamente en:" -ForegroundColor Green
+    Write-Host "  $obsScriptsDir" -ForegroundColor Green
 } catch {
-    Write-Error "Error al copiar: $_`nIntenta ejecutar este script como Administrador."
+    Write-Error "Error al copiar Set-Stream-Info: $_"
     exit 1
 }
