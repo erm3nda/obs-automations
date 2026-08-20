@@ -90,37 +90,37 @@ def script_properties():
     props = obs.obs_properties_create()
     horizontal_props = obs.obs_properties_create()
     obs.obs_properties_add_path(
-        horizontal_props, "base_folder", "Carpeta base horizontal",
+        horizontal_props, "base_folder", "Carpeta de grabación",
         obs.OBS_PATH_DIRECTORY, "", None
     )
     obs.obs_properties_add_text(
         horizontal_props, "base_filename_format",
-        "Formato de nombre base (vacío = auto)",
+        "Formato de nombre",
         obs.OBS_TEXT_DEFAULT
     )
     obs.obs_properties_add_bool(
         horizontal_props, "keep_recording",
-        "Mantener grabación activa al cambiar escena"
+        "Mantener grabación activa"
     )
     obs.obs_properties_add_bool(
         horizontal_props, "auto_start_recording",
-        "Auto-start: iniciar grabación al cambiar escena"
+        "Auto-start: grabación"
     )
     obs.obs_properties_add_bool(
         horizontal_props, "auto_start_replay",
-        "Auto-start: iniciar replay buffer al cambiar escena"
+        "Auto-start: replay buffer"
     )
     obs.obs_properties_add_bool(
         horizontal_props, "enable_cleanup",
-        "Limpiar archivos horizontales (Requiere OpenCV)"
+        "Limpiar archivos"
     )
     obs.obs_properties_add_int(
         horizontal_props, "min_size_mb",
-        "Tamaño mín. horizontal (MB)", 0, 500, 1
+        "Tamaño mínimo (MB)", 0, 500, 1
     )
     obs.obs_properties_add_int_slider(
         horizontal_props, "cleanup_threshold",
-        "% negro para eliminar horizontal", 50, 100, 1
+        "% de negro para eliminar", 50, 100, 1
     )
     obs.obs_properties_add_group(
         props, "horizontal_settings", "Ajustes de OBS horizontal",
@@ -130,39 +130,37 @@ def script_properties():
     if get_vertical_config_path():
         vertical_props = obs.obs_properties_create()
         obs.obs_properties_add_bool(
-            vertical_props, "apply_vertical_paths", "Activar en Vertical"
+            vertical_props, "apply_vertical_paths", "Activar en vertical"
+        )
+        obs.obs_properties_add_bool(
+            vertical_props, "keep_vertical_recording",
+            "Mantener grabación activa"
+        )
+        obs.obs_properties_add_bool(
+            vertical_props, "auto_start_vertical_recording",
+            "Auto-start: grabación"
+        )
+        obs.obs_properties_add_bool(
+            vertical_props, "auto_start_vertical_backtrack",
+            "Auto-start: backtrack"
+        )
+        obs.obs_properties_add_text(
+            vertical_props, "vertical_backtrack_note",
+            "Nota: activa Backtrack; su checkbox no cambia",
+            obs.OBS_TEXT_INFO
         )
         obs.obs_properties_add_bool(
             vertical_props, "move_vertical_files", "Mover ficheros automáticamente"
         )
         obs.obs_properties_add_bool(
-            vertical_props, "auto_start_vertical_recording",
-            "Auto-start: grabación vertical al cambiar escena"
-        )
-        obs.obs_properties_add_bool(
-            vertical_props, "keep_vertical_recording",
-            "Mantener grabación vertical activa al cambiar escena"
-        )
-        obs.obs_properties_add_bool(
-            vertical_props, "auto_start_vertical_backtrack",
-            "Auto-start: backtrack vertical al cambiar escena"
-        )
-        obs.obs_properties_add_text(
-            vertical_props, "vertical_backtrack_note",
-            "Nota: activa Backtrack; su checkbox no cambia.",
-            obs.OBS_TEXT_INFO
-        )
-        obs.obs_properties_add_bool(
-            vertical_props, "enable_vertical_cleanup",
-            "Limpiar archivos verticales (Requiere OpenCV)"
+            vertical_props, "enable_vertical_cleanup", "Limpiar archivos"
         )
         obs.obs_properties_add_int(
-            vertical_props, "vertical_min_size_mb",
-            "Tamaño mín. vertical (MB)", 0, 500, 1
+            vertical_props, "vertical_min_size_mb", "Tamaño mínimo (MB)", 0, 500, 1
         )
         obs.obs_properties_add_int_slider(
             vertical_props, "vertical_cleanup_threshold",
-            "% negro para eliminar vertical", 50, 100, 1
+            "% de negro para eliminar", 50, 100, 1
         )
         obs.obs_properties_add_group(
             props, "vertical_settings", "Ajustes de Aitum Vertical",
