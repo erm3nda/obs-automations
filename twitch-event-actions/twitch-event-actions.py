@@ -3,6 +3,7 @@ import json
 import urllib.request
 import urllib.error
 import webbrowser
+import time
 
 # Shared Twitch connection settings
 client_id = ""
@@ -13,17 +14,21 @@ chat_channel = ""
 
 # Chat action settings
 chat_enabled = False
-chat_target_type = 0  # 0: Fuente de Texto, 1: Fuente/Escena (visibilidad)
+chat_target_type = 0  # 0: Lista de mensajes de chat (hasta 4), 1: Mostrar/Ocultar Fuente o Escena, 2: Texto estático único
 chat_target_source = ""
 chat_duration = 5
 
 # Subscription action settings
 subscriptions_enabled = False
-sub_target_type = 1   # 0: Fuente de Texto, 1: Fuente/Escena (visibilidad)
+sub_target_type = 1   # 0: Texto estático único, 1: Mostrar/Ocultar Fuente o Escena
 sub_target_source = ""
 sub_duration = 5
 
 _script_settings = None
+
+# Historial de mensajes de chat con timestamps: list of (timestamp, formatted_text)
+_chat_message_history = []
+_test_msg_counter = 1
 
 # Dynamic active timers dictionary to manage hide timeouts safely
 # Key: source_name (str), Value: timer_callback
@@ -63,15 +68,16 @@ def script_properties():
         chat_props, "chat_target_type", "Tipo de Acción Chat",
         obs.OBS_COMBO_TYPE_LIST, obs.OBS_COMBO_FORMAT_INT
     )
-    obs.obs_property_list_add_int(p_chat_type, "Actualizar Texto de Fuente", 0)
+    obs.obs_property_list_add_int(p_chat_type, "Lista de mensajes de chat (hasta 4 líneas)", 0)
     obs.obs_property_list_add_int(p_chat_type, "Mostrar/Ocultar Fuente o Escena", 1)
+    obs.obs_property_list_add_int(p_chat_type, "Actualizar Texto único", 2)
 
     p_chat_source = obs.obs_properties_add_list(
         chat_props, "chat_target_source", "Fuente/Escena de Chat",
         obs.OBS_COMBO_TYPE_EDITABLE, obs.OBS_COMBO_FORMAT_STRING
     )
-    obs.obs_properties_add_int(chat_props, "chat_duration", "Ocultar / Borrar tras (segundos)", 1, 300, 1)
-    obs.obs_properties_add_button(chat_props, "test_chat_button", "▶ Probar Acción Chat", on_test_chat)
+    obs.obs_properties_add_int(chat_props, "chat_duration", "Ocultar tras (segundos, solo visibilidad/texto único)", 1, 300, 1)
+    obs.obs_properties_add_button(chat_props, "test_chat_button", "▶ Añadir mensaje de chat simulado", on_test_chat)
     
     obs.obs_properties_add_group(props, "chat_actions", "💬 Evento: Chat", obs.OBS_GROUP_NORMAL, chat_props)
 
@@ -227,6 +233,28 @@ def _update_source_text(source_name, text):
     obs.obs_source_release(source)
 
 
+def _prune_expired_chat_messages():
+    """Elimina mensajes con más de 5 minutos (300 s) si no ha habido actividad."""
+    global _chat_message_history
+    current_now = time.time()
+    _chat_message_history = [
+        (ts, msg) for (ts, msg) in _chat_message_history
+        if (current_now - ts) < 300
+    ]
+
+
+def _append_chat_message(source_name, new_msg):
+    """Añade un mensaje a la lista acumulativa de hasta 4 mensajes."""
+    global _chat_message_history
+    _prune_expired_chat_messages()
+    _chat_message_history.append((time.time(), new_msg))
+    if len(_chat_message_history) > 4:
+        _chat_message_history = _chat_message_history[-4:]
+    
+    combined_text = "\n".join(msg for _, msg in _chat_message_history)
+    _update_source_text(source_name, combined_text)
+
+
 def _set_source_visibility(source_name, visible):
     if not source_name:
         return
@@ -275,27 +303,30 @@ def trigger_event_action(action_type, target_source, duration, text_payload=""):
         obs.script_log(obs.LOG_WARNING, "Twitch Event Actions: No se ha especificado fuente de destino.")
         return
 
-    if action_type == 0:  # Actualizar Texto
-        _update_source_text(target_source, text_payload)
-    elif action_type == 1:  # Visibilidad
+    if action_type == 0:  # Lista de mensajes de chat acumulativa
+        _append_chat_message(target_source, text_payload)
+    elif action_type == 1:  # Mostrar/Ocultar Visibilidad
         _set_source_visibility(target_source, True)
-
-    # Programar temporizador para revertir/ocultar
-    _schedule_auto_hide(target_source, action_type, duration)
+        _schedule_auto_hide(target_source, action_type, duration)
+    elif action_type == 2:  # Actualizar Texto único con auto-borrado
+        _update_source_text(target_source, text_payload)
+        _schedule_auto_hide(target_source, 0, duration)
 
 
 # --- Handlers de prueba manuales ---
 
 def on_test_chat(properties, property):
+    global _test_msg_counter
     if not enabled:
         return True
-    obs.script_log(obs.LOG_INFO, "Probando acción de chat...")
+    obs.script_log(obs.LOG_INFO, "Simulando nuevo mensaje de chat...")
     trigger_event_action(
         chat_target_type,
         chat_target_source,
         chat_duration,
-        "UsuarioPrueba: ¡Mensaje de prueba de chat!"
+        "Usuario_{}: Mensaje simulado #{}".format(_test_msg_counter, _test_msg_counter)
     )
+    _test_msg_counter += 1
     return True
 
 
