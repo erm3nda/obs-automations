@@ -14,9 +14,10 @@ chat_channel = ""
 
 # Chat action settings
 chat_enabled = False
-chat_target_type = 0  # 0: Lista de mensajes de chat (hasta 4), 1: Mostrar/Ocultar Fuente o Escena, 2: Texto estático único
+chat_target_type = 0  # 0: Lista de mensajes de chat, 1: Mostrar/Ocultar Fuente o Escena, 2: Texto estático único
 chat_target_source = ""
 chat_duration = 5
+chat_max_lines = 4
 
 # Subscription action settings
 subscriptions_enabled = False
@@ -68,7 +69,7 @@ def script_properties():
         chat_props, "chat_target_type", "Tipo de Acción Chat",
         obs.OBS_COMBO_TYPE_LIST, obs.OBS_COMBO_FORMAT_INT
     )
-    obs.obs_property_list_add_int(p_chat_type, "Lista de mensajes de chat (hasta 4 líneas)", 0)
+    obs.obs_property_list_add_int(p_chat_type, "Lista acumulativa de mensajes de chat", 0)
     obs.obs_property_list_add_int(p_chat_type, "Mostrar/Ocultar Fuente o Escena", 1)
     obs.obs_property_list_add_int(p_chat_type, "Actualizar Texto único", 2)
 
@@ -76,7 +77,8 @@ def script_properties():
         chat_props, "chat_target_source", "Fuente/Escena de Chat",
         obs.OBS_COMBO_TYPE_EDITABLE, obs.OBS_COMBO_FORMAT_STRING
     )
-    obs.obs_properties_add_int(chat_props, "chat_duration", "Ocultar tras (segundos, solo visibilidad/texto único)", 1, 300, 1)
+    obs.obs_properties_add_int(chat_props, "chat_max_lines", "Número máximo de líneas en chat", 1, 20, 1)
+    obs.obs_properties_add_int(chat_props, "chat_duration", "Tiempo de permanencia por mensaje (segundos)", 1, 300, 1)
     obs.obs_properties_add_button(chat_props, "test_chat_button", "▶ Añadir mensaje de chat simulado", on_test_chat)
     
     obs.obs_properties_add_group(props, "chat_actions", "💬 Evento: Chat", obs.OBS_GROUP_NORMAL, chat_props)
@@ -124,6 +126,7 @@ def script_defaults(settings):
     obs.obs_data_set_default_bool(settings, "chat_enabled", False)
     obs.obs_data_set_default_int(settings, "chat_target_type", 0)
     obs.obs_data_set_default_string(settings, "chat_target_source", "twitch_chat")
+    obs.obs_data_set_default_int(settings, "chat_max_lines", 4)
     obs.obs_data_set_default_int(settings, "chat_duration", 5)
 
     obs.obs_data_set_default_bool(settings, "subscriptions_enabled", False)
@@ -149,6 +152,7 @@ def script_update(settings):
     chat_enabled = obs.obs_data_get_bool(settings, "chat_enabled")
     chat_target_type = obs.obs_data_get_int(settings, "chat_target_type")
     chat_target_source = obs.obs_data_get_string(settings, "chat_target_source").strip()
+    chat_max_lines = obs.obs_data_get_int(settings, "chat_max_lines")
     chat_duration = obs.obs_data_get_int(settings, "chat_duration")
 
     subscriptions_enabled = obs.obs_data_get_bool(settings, "subscriptions_enabled")
@@ -233,42 +237,48 @@ def _update_source_text(source_name, text):
     obs.obs_source_release(source)
 
 
-def _prune_expired_chat_messages(duration_seconds):
-    """Elimina mensajes cuyo tiempo de vida haya superado los segundos configurados."""
+def _render_and_schedule_prune(source_name, duration_seconds):
+    """Filtra mensajes expirados del historial, actualiza la fuente de texto y programa el siguiente timer."""
     global _chat_message_history
-    current_now = time.time()
-    max_age = duration_seconds if duration_seconds > 0 else 300
+    now = time.time()
+    
+    # Filtrar sólo los mensajes que no han superado el tiempo de permanencia
     _chat_message_history = [
         (ts, msg) for (ts, msg) in _chat_message_history
-        if (current_now - ts) < max_age
+        if (now - ts) < duration_seconds
     ]
-
-
-def _append_chat_message(source_name, new_msg, duration_seconds):
-    """Añade un mensaje a la lista acumulativa de hasta 4 mensajes respetando el tiempo de expiración."""
-    global _chat_message_history
-    _prune_expired_chat_messages(duration_seconds)
-    _chat_message_history.append((time.time(), new_msg))
-    if len(_chat_message_history) > 4:
-        _chat_message_history = _chat_message_history[-4:]
     
+    # Renderizar el texto uniendo las líneas restantes
     combined_text = "\n".join(msg for _, msg in _chat_message_history)
     _update_source_text(source_name, combined_text)
 
-    # Programar temporizador para forzar la actualización/limpieza cuando expire el más antiguo
+    # Si hay un timer activo anterior para este chat, se elimina
+    if source_name in _active_hide_timers:
+        obs.timer_remove(_active_hide_timers[source_name])
+        del _active_hide_timers[source_name]
+
+    # Si aún quedan mensajes en el historial, programamos el siguiente timer justo cuando venza el mensaje más antiguo
     if _chat_message_history and duration_seconds > 0:
-        if source_name in _active_hide_timers:
-            obs.timer_remove(_active_hide_timers[source_name])
-            del _active_hide_timers[source_name]
+        oldest_ts = _chat_message_history[0][0]
+        time_left = max(0.1, duration_seconds - (now - oldest_ts))
 
-        def _chat_prune_timer_cb():
-            # No eliminamos el timer aquí para permitir limpiezas continuas
-            _prune_expired_chat_messages(duration_seconds)
-            updated_text = "\n".join(msg for _, msg in _chat_message_history)
-            _update_source_text(source_name, updated_text)
+        def _prune_cb():
+            _render_and_schedule_prune(source_name, duration_seconds)
 
-        _active_hide_timers[source_name] = _chat_prune_timer_cb
-        obs.timer_add(_chat_prune_timer_cb, duration_seconds * 1000)
+        _active_hide_timers[source_name] = _prune_cb
+        obs.timer_add(_prune_cb, int(time_left * 1000))
+
+
+def _append_chat_message(source_name, new_msg, duration_seconds, max_lines):
+    """Añade un mensaje nuevo al final de la cola del historial y actualiza el renderizado."""
+    global _chat_message_history
+    _chat_message_history.append((time.time(), new_msg))
+    
+    # Limitar al número máximo de líneas configurado
+    if len(_chat_message_history) > max_lines:
+        _chat_message_history = _chat_message_history[-max_lines:]
+
+    _render_and_schedule_prune(source_name, duration_seconds)
 
 
 def _set_source_visibility(source_name, visible):
@@ -319,8 +329,8 @@ def trigger_event_action(action_type, target_source, duration, text_payload=""):
         obs.script_log(obs.LOG_WARNING, "Twitch Event Actions: No se ha especificado fuente de destino.")
         return
 
-    if action_type == 0:  # Lista de mensajes de chat acumulativa con temporizador por duración
-        _append_chat_message(target_source, text_payload, duration)
+    if action_type == 0:  # Lista de mensajes de chat acumulativa
+        _append_chat_message(target_source, text_payload, duration, chat_max_lines)
     elif action_type == 1:  # Mostrar/Ocultar Visibilidad
         _set_source_visibility(target_source, True)
         _schedule_auto_hide(target_source, action_type, duration)
