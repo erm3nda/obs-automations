@@ -373,6 +373,7 @@ def on_test_subscription(properties, property):
 
 def script_load(settings):
     obs.script_log(obs.LOG_INFO, "Twitch Event Actions cargado correctamente.")
+    obs.script_log(obs.LOG_WARNING, "Twitch Event Actions: Nota - La recepción de chat en tiempo real mediante WebSocket/IRC requiere implementar el listener de eventos de Twitch. Actualmente solo están activos los botones de prueba manuales y la configuración.")
 
 
 def script_unload():
