@@ -196,8 +196,9 @@ def _render_and_schedule_prune(source_name, duration_seconds):
     all_messages_blocks = []
     
     for _, msg in active_history:
-        # Dividir cada mensaje manualmente en fragmentos según chat_max_chars
-        chunks = [msg[i:i+max_c] for i in range(0, len(msg), max_c)]
+        # Usar textwrap para evitar cortar palabras y manejar palabras largas
+        wrapper = textwrap.TextWrapper(width=max_c, break_long_words=True, break_on_hyphens=True)
+        chunks = wrapper.wrap(msg)
         if chunks:
             all_messages_blocks.append("\n".join(chunks))
             
