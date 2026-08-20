@@ -66,7 +66,10 @@ def script_properties():
     obs.obs_property_list_add_int(p_chat_type, "Actualizar Texto de Fuente", 0)
     obs.obs_property_list_add_int(p_chat_type, "Mostrar/Ocultar Fuente o Escena", 1)
 
-    obs.obs_properties_add_text(chat_props, "chat_target_source", "Fuente/Escena de Chat", obs.OBS_TEXT_DEFAULT)
+    p_chat_source = obs.obs_properties_add_list(
+        chat_props, "chat_target_source", "Fuente/Escena de Chat",
+        obs.OBS_COMBO_TYPE_EDITABLE, obs.OBS_COMBO_FORMAT_STRING
+    )
     obs.obs_properties_add_int(chat_props, "chat_duration", "Ocultar / Borrar tras (segundos)", 1, 300, 1)
     obs.obs_properties_add_button(chat_props, "test_chat_button", "▶ Probar Acción Chat", on_test_chat)
     
@@ -83,7 +86,19 @@ def script_properties():
     obs.obs_property_list_add_int(p_sub_type, "Actualizar Texto de Fuente", 0)
     obs.obs_property_list_add_int(p_sub_type, "Mostrar/Ocultar Fuente o Escena", 1)
 
-    obs.obs_properties_add_text(sub_props, "sub_target_source", "Fuente/Escena de Suscripción", obs.OBS_TEXT_DEFAULT)
+    p_sub_source = obs.obs_properties_add_list(
+        sub_props, "sub_target_source", "Fuente/Escena de Suscripción",
+        obs.OBS_COMBO_TYPE_EDITABLE, obs.OBS_COMBO_FORMAT_STRING
+    )
+
+    # Rellenar listas de fuentes desde OBS
+    sources = obs.obs_enum_sources()
+    if sources is not None:
+        for source in sources:
+            name = obs.obs_source_get_name(source)
+            obs.obs_property_list_add_string(p_chat_source, name, name)
+            obs.obs_property_list_add_string(p_sub_source, name, name)
+        obs.source_list_release(sources)
     obs.obs_properties_add_int(sub_props, "sub_duration", "Ocultar / Borrar tras (segundos)", 1, 300, 1)
     obs.obs_properties_add_button(sub_props, "test_sub_button", "▶ Probar Acción Suscripción", on_test_subscription)
     
@@ -102,12 +117,12 @@ def script_defaults(settings):
     
     obs.obs_data_set_default_bool(settings, "chat_enabled", False)
     obs.obs_data_set_default_int(settings, "chat_target_type", 0)
-    obs.obs_data_set_default_string(settings, "chat_target_source", "")
+    obs.obs_data_set_default_string(settings, "chat_target_source", "twitch_chat")
     obs.obs_data_set_default_int(settings, "chat_duration", 5)
 
     obs.obs_data_set_default_bool(settings, "subscriptions_enabled", False)
     obs.obs_data_set_default_int(settings, "sub_target_type", 1)
-    obs.obs_data_set_default_string(settings, "sub_target_source", "")
+    obs.obs_data_set_default_string(settings, "sub_target_source", "twitch_subscription")
     obs.obs_data_set_default_int(settings, "sub_duration", 5)
 
 
@@ -215,16 +230,19 @@ def _update_source_text(source_name, text):
 def _set_source_visibility(source_name, visible):
     if not source_name:
         return
-    scene_source = obs.obs_frontend_get_current_scene()
-    if not scene_source:
-        return
-    scene = obs.obs_scene_from_source(scene_source)
-    item = obs.obs_scene_find_source(scene, source_name) if scene else None
-    if item:
-        obs.obs_sceneitem_set_visible(item, visible)
-    else:
-        obs.script_log(obs.LOG_WARNING, "No se encontró la fuente/escena '{}' en la escena activa.".format(source_name))
-    obs.obs_source_release(scene_source)
+    found = False
+    scenes = obs.obs_frontend_get_scenes()
+    if scenes:
+        for sc_src in scenes:
+            scene = obs.obs_scene_from_source(sc_src)
+            if scene:
+                item = obs.obs_scene_find_source(scene, source_name)
+                if item:
+                    obs.obs_sceneitem_set_visible(item, visible)
+                    found = True
+        obs.source_list_release(scenes)
+    if not found:
+        obs.script_log(obs.LOG_WARNING, "No se encontró la fuente/escena '{}' en ninguna escena.".format(source_name))
 
 
 def _schedule_auto_hide(source_name, action_type, duration_seconds):
