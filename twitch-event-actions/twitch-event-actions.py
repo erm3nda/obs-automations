@@ -3,7 +3,6 @@ import json
 import urllib.request
 import urllib.error
 import webbrowser
-import threading
 
 # Shared Twitch connection settings
 client_id = ""
@@ -14,95 +13,80 @@ chat_channel = ""
 
 # Chat action settings
 chat_enabled = False
-chat_text_source = ""
+chat_target_type = 0  # 0: Fuente de Texto, 1: Fuente/Escena (visibilidad)
+chat_target_source = ""
+chat_duration = 5
 
 # Subscription action settings
 subscriptions_enabled = False
-subscription_source = ""
+sub_target_type = 1   # 0: Fuente de Texto, 1: Fuente/Escena (visibilidad)
+sub_target_source = ""
+sub_duration = 5
+
 _script_settings = None
-_chat_test_timer = None
-_subscription_test_timer = None
-_subscription_hide_timer = None
+
+# Dynamic active timers dictionary to manage hide timeouts safely
+# Key: source_name (str), Value: timer_callback
+_active_hide_timers = {}
 
 
 def script_description():
     return (
         "<b>Twitch Event Actions</b><br>"
-        "Motor compartido para eventos de Twitch que ejecutan acciones en OBS.<br><br>"
-        "Configura primero Twitch y después activa Chat o Suscripciones.<br>"
-        "El resto de eventos se añadirá sobre este mismo motor."
+        "Motor flexible de eventos para Twitch con acciones en OBS.<br><br>"
+        "Configura la conexión de Twitch y personaliza cada acción (visibilidad o texto) y su duración."
     )
 
 
 def script_properties():
     props = obs.obs_properties_create()
 
+    # --- Grupo Conexión Twitch ---
     twitch_props = obs.obs_properties_create()
-    obs.obs_properties_add_text(
-        twitch_props, "client_id", "Twitch Client ID", obs.OBS_TEXT_DEFAULT
-    )
-    obs.obs_properties_add_text(
-        twitch_props, "oauth_token", "Twitch OAuth Token", obs.OBS_TEXT_PASSWORD
-    )
-    obs.obs_properties_add_text(
-        twitch_props, "refresh_token", "Twitch Refresh Token", obs.OBS_TEXT_PASSWORD
-    )
-    obs.obs_properties_add_text(
-        twitch_props, "broadcaster_id",
-        "Broadcaster ID (opcional; se obtiene automáticamente)",
-        obs.OBS_TEXT_DEFAULT
-    )
-    obs.obs_properties_add_text(
-        twitch_props, "chat_channel", "Canal de chat", obs.OBS_TEXT_DEFAULT
-    )
-    obs.obs_properties_add_button(
-        twitch_props, "refresh_token_button", "Refrescar token", on_refresh_token
-    )
-    obs.obs_properties_add_button(
-        twitch_props, "broadcaster_id_button", "Obtener Broadcaster ID",
-        on_get_broadcaster_id
-    )
-    obs.obs_properties_add_button(
-        twitch_props, "generate_token_button", "Abrir generador de token", on_generate_token
-    )
-    obs.obs_properties_add_group(
-        props, "twitch_connection", "Conexión Twitch",
-        obs.OBS_GROUP_NORMAL, twitch_props
-    )
+    obs.obs_properties_add_text(twitch_props, "client_id", "Twitch Client ID", obs.OBS_TEXT_DEFAULT)
+    obs.obs_properties_add_text(twitch_props, "oauth_token", "Twitch OAuth Token", obs.OBS_TEXT_PASSWORD)
+    obs.obs_properties_add_text(twitch_props, "refresh_token", "Twitch Refresh Token", obs.OBS_TEXT_PASSWORD)
+    obs.obs_properties_add_text(twitch_props, "broadcaster_id", "Broadcaster ID (auto)", obs.OBS_TEXT_DEFAULT)
+    obs.obs_properties_add_text(twitch_props, "chat_channel", "Canal de chat", obs.OBS_TEXT_DEFAULT)
+    obs.obs_properties_add_button(twitch_props, "refresh_token_button", "Refrescar token", on_refresh_token)
+    obs.obs_properties_add_button(twitch_props, "broadcaster_id_button", "Obtener Broadcaster ID", on_get_broadcaster_id)
+    obs.obs_properties_add_button(twitch_props, "generate_token_button", "Abrir generador de token", on_generate_token)
+    
+    obs.obs_properties_add_group(props, "twitch_connection", "🔐 Conexión Twitch", obs.OBS_GROUP_NORMAL, twitch_props)
 
+    # --- Grupo Chat Actions ---
     chat_props = obs.obs_properties_create()
-    obs.obs_properties_add_bool(
-        chat_props, "chat_enabled", "Activar eventos de chat"
+    obs.obs_properties_add_bool(chat_props, "chat_enabled", "Activar eventos de chat")
+    
+    p_chat_type = obs.obs_properties_add_list(
+        chat_props, "chat_target_type", "Tipo de Acción Chat",
+        obs.OBS_COMBO_TYPE_LIST, obs.OBS_COMBO_FORMAT_INT
     )
-    obs.obs_properties_add_text(
-        chat_props, "chat_text_source", "Fuente de texto del chat",
-        obs.OBS_TEXT_DEFAULT
-    )
-    obs.obs_properties_add_button(
-        chat_props, "test_chat_button", "Probar chat (en 2 s)", on_test_chat
-    )
-    obs.obs_properties_add_group(
-        props, "chat_actions", "Chat",
-        obs.OBS_GROUP_NORMAL, chat_props
-    )
+    obs.obs_property_list_add_int(p_chat_type, "Actualizar Texto de Fuente", 0)
+    obs.obs_property_list_add_int(p_chat_type, "Mostrar/Ocultar Fuente o Escena", 1)
 
-    subscription_props = obs.obs_properties_create()
-    obs.obs_properties_add_bool(
-        subscription_props, "subscriptions_enabled",
-        "Activar eventos de suscripciones"
+    obs.obs_properties_add_text(chat_props, "chat_target_source", "Fuente/Escena de Chat", obs.OBS_TEXT_DEFAULT)
+    obs.obs_properties_add_int(chat_props, "chat_duration", "Ocultar / Borrar tras (segundos)", 1, 300, 1)
+    obs.obs_properties_add_button(chat_props, "test_chat_button", "▶ Probar Acción Chat", on_test_chat)
+    
+    obs.obs_properties_add_group(props, "chat_actions", "💬 Evento: Chat", obs.OBS_GROUP_NORMAL, chat_props)
+
+    # --- Grupo Subscriptions Actions ---
+    sub_props = obs.obs_properties_create()
+    obs.obs_properties_add_bool(sub_props, "subscriptions_enabled", "Activar eventos de suscripción")
+    
+    p_sub_type = obs.obs_properties_add_list(
+        sub_props, "sub_target_type", "Tipo de Acción Suscripción",
+        obs.OBS_COMBO_TYPE_LIST, obs.OBS_COMBO_FORMAT_INT
     )
-    obs.obs_properties_add_text(
-        subscription_props, "subscription_source",
-        "Fuente o escena de suscripción", obs.OBS_TEXT_DEFAULT
-    )
-    obs.obs_properties_add_button(
-        subscription_props, "test_subscription_button",
-        "Probar suscripción (2 s / 5 s visible)", on_test_subscription
-    )
-    obs.obs_properties_add_group(
-        props, "subscription_actions", "Suscripciones",
-        obs.OBS_GROUP_NORMAL, subscription_props
-    )
+    obs.obs_property_list_add_int(p_sub_type, "Actualizar Texto de Fuente", 0)
+    obs.obs_property_list_add_int(p_sub_type, "Mostrar/Ocultar Fuente o Escena", 1)
+
+    obs.obs_properties_add_text(sub_props, "sub_target_source", "Fuente/Escena de Suscripción", obs.OBS_TEXT_DEFAULT)
+    obs.obs_properties_add_int(sub_props, "sub_duration", "Ocultar / Borrar tras (segundos)", 1, 300, 1)
+    obs.obs_properties_add_button(sub_props, "test_sub_button", "▶ Probar Acción Suscripción", on_test_subscription)
+    
+    obs.obs_properties_add_group(props, "sub_actions", "⭐ Evento: Suscripciones", obs.OBS_GROUP_NORMAL, sub_props)
 
     return props
 
@@ -113,17 +97,23 @@ def script_defaults(settings):
     obs.obs_data_set_default_string(settings, "refresh_token", "")
     obs.obs_data_set_default_string(settings, "broadcaster_id", "")
     obs.obs_data_set_default_string(settings, "chat_channel", "")
+    
     obs.obs_data_set_default_bool(settings, "chat_enabled", False)
-    obs.obs_data_set_default_string(settings, "chat_text_source", "")
+    obs.obs_data_set_default_int(settings, "chat_target_type", 0)
+    obs.obs_data_set_default_string(settings, "chat_target_source", "")
+    obs.obs_data_set_default_int(settings, "chat_duration", 5)
+
     obs.obs_data_set_default_bool(settings, "subscriptions_enabled", False)
-    obs.obs_data_set_default_string(settings, "subscription_source", "")
+    obs.obs_data_set_default_int(settings, "sub_target_type", 1)
+    obs.obs_data_set_default_string(settings, "sub_target_source", "")
+    obs.obs_data_set_default_int(settings, "sub_duration", 5)
 
 
 def script_update(settings):
     global _script_settings
     global client_id, oauth_token, refresh_token, broadcaster_id, chat_channel
-    global chat_enabled, chat_text_source
-    global subscriptions_enabled, subscription_source
+    global chat_enabled, chat_target_type, chat_target_source, chat_duration
+    global subscriptions_enabled, sub_target_type, sub_target_source, sub_duration
 
     _script_settings = settings
     client_id = obs.obs_data_get_string(settings, "client_id").strip()
@@ -131,10 +121,16 @@ def script_update(settings):
     refresh_token = obs.obs_data_get_string(settings, "refresh_token").strip()
     broadcaster_id = obs.obs_data_get_string(settings, "broadcaster_id").strip()
     chat_channel = obs.obs_data_get_string(settings, "chat_channel").strip().lstrip("#")
+
     chat_enabled = obs.obs_data_get_bool(settings, "chat_enabled")
-    chat_text_source = obs.obs_data_get_string(settings, "chat_text_source").strip()
+    chat_target_type = obs.obs_data_get_int(settings, "chat_target_type")
+    chat_target_source = obs.obs_data_get_string(settings, "chat_target_source").strip()
+    chat_duration = obs.obs_data_get_int(settings, "chat_duration")
+
     subscriptions_enabled = obs.obs_data_get_bool(settings, "subscriptions_enabled")
-    subscription_source = obs.obs_data_get_string(settings, "subscription_source").strip()
+    sub_target_type = obs.obs_data_get_int(settings, "sub_target_type")
+    sub_target_source = obs.obs_data_get_string(settings, "sub_target_source").strip()
+    sub_duration = obs.obs_data_get_int(settings, "sub_duration")
 
 
 def on_refresh_token(properties, property):
@@ -155,10 +151,9 @@ def on_refresh_token(properties, property):
             obs.obs_data_set_string(_script_settings, "oauth_token", oauth_token)
             obs.obs_data_set_string(_script_settings, "refresh_token", refresh_token)
         obs.script_log(obs.LOG_INFO, "Twitch Event Actions: token refrescado correctamente.")
-        return True
     except (urllib.error.URLError, ValueError) as error:
         obs.script_log(obs.LOG_ERROR, "Twitch Event Actions: error refrescando token: {}".format(error))
-        return True
+    return True
 
 
 def on_generate_token(properties, property):
@@ -198,101 +193,107 @@ def on_get_broadcaster_id(properties, property):
     return True
 
 
-def _set_text_source(text):
-    if not chat_text_source:
-        obs.script_log(obs.LOG_WARNING, "Twitch Event Actions: falta la fuente de texto del chat.")
+# --- Funciones Genéricas de Ejecución de Acciones ---
+
+def _update_source_text(source_name, text):
+    if not source_name:
         return
-    source = obs.obs_get_source_by_name(chat_text_source)
+    source = obs.obs_get_source_by_name(source_name)
     if not source:
-        obs.script_log(obs.LOG_WARNING, "No existe la fuente de texto '{}'.".format(chat_text_source))
+        obs.script_log(obs.LOG_WARNING, "No existe la fuente de texto '{}'.".format(source_name))
         return
     settings = obs.obs_source_get_settings(source)
     obs.obs_data_set_string(settings, "text", text)
     obs.obs_source_update(source, settings)
     obs.obs_data_release(settings)
     obs.obs_source_release(source)
-    obs.script_log(obs.LOG_INFO, "Texto de chat actualizado en '{}'.".format(chat_text_source))
 
 
-def _set_subscription_visibility(visible):
-    if not subscription_source:
-        obs.script_log(obs.LOG_WARNING, "Twitch Event Actions: falta la fuente/escena de suscripción.")
+def _set_source_visibility(source_name, visible):
+    if not source_name:
         return
     scene_source = obs.obs_frontend_get_current_scene()
     if not scene_source:
         return
     scene = obs.obs_scene_from_source(scene_source)
-    item = obs.obs_scene_find_source(scene, subscription_source) if scene else None
+    item = obs.obs_scene_find_source(scene, source_name) if scene else None
     if item:
         obs.obs_sceneitem_set_visible(item, visible)
-        obs.script_log(
-            obs.LOG_INFO,
-            "Fuente de suscripción '{}' {}.".format(
-                subscription_source, "mostrada" if visible else "ocultada"
-            )
-        )
     else:
-        obs.script_log(obs.LOG_WARNING, "No se encontró '{}' en la escena activa.".format(subscription_source))
+        obs.script_log(obs.LOG_WARNING, "No se encontró la fuente/escena '{}' en la escena activa.".format(source_name))
     obs.obs_source_release(scene_source)
 
 
-def _run_chat_test():
-    global _chat_test_timer
-    _chat_test_timer = None
-    _set_text_source("usuario_prueba: mensaje de prueba de Twitch")
+def _schedule_auto_hide(source_name, action_type, duration_seconds):
+    """Maneja el ocultado / borrado automático después del tiempo especificado."""
+    if not source_name or duration_seconds <= 0:
+        return
+
+    # Limpiar temporizador previo para la misma fuente si existía
+    if source_name in _active_hide_timers:
+        obs.timer_remove(_active_hide_timers[source_name])
+        del _active_hide_timers[source_name]
+
+    def _hide_callback():
+        if source_name in _active_hide_timers:
+            obs.timer_remove(_active_hide_timers[source_name])
+            del _active_hide_timers[source_name]
+
+        if action_type == 0:  # Borrar texto
+            _update_source_text(source_name, "")
+        else:  # Ocultar visibilidad
+            _set_source_visibility(source_name, False)
+
+    _active_hide_timers[source_name] = _hide_callback
+    obs.timer_add(_hide_callback, duration_seconds * 1000)
 
 
-def _hide_subscription_test():
-    global _subscription_hide_timer
-    _subscription_hide_timer = None
-    _set_subscription_visibility(False)
+def trigger_event_action(action_type, target_source, duration, text_payload=""):
+    """Dispara una acción de evento configurable."""
+    if not target_source:
+        obs.script_log(obs.LOG_WARNING, "Twitch Event Actions: No se ha especificado fuente de destino.")
+        return
+
+    if action_type == 0:  # Actualizar Texto
+        _update_source_text(target_source, text_payload)
+    elif action_type == 1:  # Visibilidad
+        _set_source_visibility(target_source, True)
+
+    # Programar temporizador para revertir/ocultar
+    _schedule_auto_hide(target_source, action_type, duration)
 
 
-def _run_subscription_test():
-    global _subscription_test_timer, _subscription_hide_timer
-    _subscription_test_timer = None
-    _set_subscription_visibility(True)
-    if _subscription_hide_timer:
-        obs.timer_remove(_hide_subscription_test)
-    _subscription_hide_timer = True
-    obs.timer_add(_hide_subscription_test, 5000)
-
+# --- Handlers de prueba manuales ---
 
 def on_test_chat(properties, property):
-    global _chat_test_timer
-    if _chat_test_timer:
-        obs.timer_remove(_run_chat_test)
-    _chat_test_timer = True
-    obs.timer_add(_run_chat_test, 2000)
-    obs.script_log(obs.LOG_INFO, "Prueba de chat programada para dentro de 2 segundos.")
+    obs.script_log(obs.LOG_INFO, "Probando acción de chat...")
+    trigger_event_action(
+        chat_target_type,
+        chat_target_source,
+        chat_duration,
+        "UsuarioPrueba: ¡Mensaje de prueba de chat!"
+    )
     return True
 
 
 def on_test_subscription(properties, property):
-    global _subscription_test_timer
-    if _subscription_test_timer:
-        obs.timer_remove(_run_subscription_test)
-    _subscription_test_timer = True
-    obs.timer_add(_run_subscription_test, 2000)
-    obs.script_log(obs.LOG_INFO, "Prueba de suscripción programada para dentro de 2 segundos.")
+    obs.script_log(obs.LOG_INFO, "Probando acción de suscripción...")
+    trigger_event_action(
+        sub_target_type,
+        sub_target_source,
+        sub_duration,
+        "¡Nuevo suscriptor: UsuarioPrueba!"
+    )
     return True
 
 
 def script_load(settings):
-    obs.script_log(obs.LOG_INFO, "Twitch Event Actions cargado.")
-    obs.script_log(
-        obs.LOG_INFO,
-        "Paneles disponibles: Chat y Suscripciones."
-    )
+    obs.script_log(obs.LOG_INFO, "Twitch Event Actions cargado correctamente.")
 
 
 def script_unload():
-    # Limpieza segura de temporizadores al descargar el script
-    if _chat_test_timer:
-        obs.timer_remove(_run_chat_test)
-    if _subscription_test_timer:
-        obs.timer_remove(_run_subscription_test)
-    if _subscription_hide_timer:
-        obs.timer_remove(_hide_subscription_test)
-    
+    # Limpiar todos los temporizadores activos al descargar
+    for source_name, timer_cb in list(_active_hide_timers.items()):
+        obs.timer_remove(timer_cb)
+    _active_hide_timers.clear()
     obs.script_log(obs.LOG_INFO, "Twitch Event Actions descargado y temporizadores limpiados.")

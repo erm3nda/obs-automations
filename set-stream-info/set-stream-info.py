@@ -120,61 +120,59 @@ def script_properties():
     active_scene = get_active_scene_name()
     t_saved, c_saved = get_scene_data_from_obs(_script_settings, active_scene)
 
-    # Valor visual por defecto si está en blanco
-    default_title_hint = t_saved if t_saved else clean_scene_name(active_scene)
-    default_cat_hint   = c_saved if c_saved else clean_scene_name(active_scene)
-
-    # Info de escena activa
+    # Grupo 1: Información de la Escena Actual y Configuración de Directo
+    scene_props = obs.obs_properties_create()
     p_title = obs.obs_properties_add_text(
-        props, "current_scene_title",
+        scene_props, "current_scene_title",
         "Título de la escena",
         obs.OBS_TEXT_DEFAULT
     )
     p_cat = obs.obs_properties_add_list(
-        props, "current_scene_category",
+        scene_props, "current_scene_category",
         "Categoría de la escena",
         obs.OBS_COMBO_TYPE_EDITABLE, obs.OBS_COMBO_FORMAT_STRING
     )
     if c_saved:
         obs.obs_property_list_add_string(p_cat, c_saved, c_saved)
 
-    # Coletilla / Sufijo global
     obs.obs_properties_add_text(
-        props, "global_suffix",
+        scene_props, "global_suffix",
         "Coletilla global",
         obs.OBS_TEXT_DEFAULT
     )
+    obs.obs_properties_add_bool(scene_props, "block_if_streaming", "🚫 NO cambiar info mientras esté emitiendo (Solo Offline)")
 
-    # 1. Casilla: Bloquear cambios mientras se esté emitiendo
-    obs.obs_properties_add_bool(props, "block_if_streaming", "🚫 NO cambiar info mientras esté emitiendo (Solo Offline)")
-
-    # 2. Modo de actualización al cambiar de escena
     list_mode = obs.obs_properties_add_list(
-        props, "update_mode", "Modo de actualización",
+        scene_props, "update_mode", "Modo de actualización",
         obs.OBS_COMBO_TYPE_LIST, obs.OBS_COMBO_FORMAT_INT
     )
     obs.obs_property_list_add_int(list_mode, "Desactivado (Solo manual / Guardado)", 0)
     obs.obs_property_list_add_int(list_mode, "⚡ Cambiar Inmediatamente", 1)
     obs.obs_property_list_add_int(list_mode, "⏱ Cambiar con Retardo", 2)
 
-    # 3. Retardo en segundos
-    obs.obs_properties_add_int(props, "delay_seconds", "Segundos de retardo", 5, 3600, 5)
-
-    # Botón manual
-    obs.obs_properties_add_button(props, "apply_button", "Aplicar y guardar escena activa", on_apply_clicked)
+    obs.obs_properties_add_int(scene_props, "delay_seconds", "Segundos de retardo", 5, 3600, 5)
+    obs.obs_properties_add_button(scene_props, "apply_button", "Aplicar y guardar escena activa", on_apply_clicked)
     
-    # Credenciales de Twitch (Auto-completados por Playwright)
-    obs.obs_properties_add_text(props, "twitch_client_id", "Twitch Client ID", obs.OBS_TEXT_DEFAULT)
-    obs.obs_properties_add_text(props, "twitch_oauth_token", "Twitch Access Token", obs.OBS_TEXT_PASSWORD)
-    obs.obs_properties_add_text(props, "twitch_refresh_token", "Twitch Refresh Token", obs.OBS_TEXT_PASSWORD)
+    obs.obs_properties_add_group(
+        props, "scene_group", "📺 Configuración de Escenas y Directo",
+        obs.OBS_GROUP_NORMAL, scene_props
+    )
 
-    # Utilidades y verificación
-    obs.obs_properties_add_button(props, "refresh_token_button", "🔍 Comprobar Token", on_refresh_button_clicked)
-    obs.obs_properties_add_button(props, "force_refresh_button", "🔄 Forzar Refresco de Token Ahora", on_force_refresh_clicked)
+    # Grupo 2: Credenciales y Conexión con Twitch
+    twitch_props = obs.obs_properties_create()
+    obs.obs_properties_add_text(twitch_props, "twitch_client_id", "Twitch Client ID", obs.OBS_TEXT_DEFAULT)
+    obs.obs_properties_add_text(twitch_props, "twitch_oauth_token", "Twitch Access Token", obs.OBS_TEXT_PASSWORD)
+    obs.obs_properties_add_text(twitch_props, "twitch_refresh_token", "Twitch Refresh Token", obs.OBS_TEXT_PASSWORD)
+    obs.obs_properties_add_text(twitch_props, "twitch_scopes", "Scopes de Twitch", obs.OBS_TEXT_DEFAULT)
     
-    # Generador Manual en Navegador
-    obs.obs_properties_add_text(props, "twitch_scopes", "Scopes de Twitch (separados por espacio)", obs.OBS_TEXT_DEFAULT)
-    obs.obs_properties_add_button(props, "manual_generate_button", "🔑 Abrir Generador de Tokens en Navegador", open_manual_token_generator)
+    obs.obs_properties_add_button(twitch_props, "refresh_token_button", "🔍 Comprobar Token", on_refresh_button_clicked)
+    obs.obs_properties_add_button(twitch_props, "force_refresh_button", "🔄 Forzar Refresco de Token", on_force_refresh_clicked)
+    obs.obs_properties_add_button(twitch_props, "manual_generate_button", "🔑 Abrir Generador en Navegador", open_manual_token_generator)
+
+    obs.obs_properties_add_group(
+        props, "twitch_group", "🔐 Credenciales y Conexión Twitch",
+        obs.OBS_GROUP_NORMAL, twitch_props
+    )
 
     return props
 
