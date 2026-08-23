@@ -4,9 +4,9 @@ Collection of Python scripts and plugins for **OBS Studio** organized into indep
 
 ## Included Plugins
 
-1. **`record-paths-by-scene`**: Automatically changes the recording and Replay Buffer output path based on the active scene (supports horizontal/landscape and Aitum Vertical, includes automatic empty folder cleanup and support for clean naming).
-2. **`twitch-stream-info`**: Configure and automatically update the stream title, category, and credentials in Twitch per scene, featuring an icon selector and settings import/export.
-3. **`twitch-event-actions`**: Unified engine for Twitch events in OBS, supporting chat actions (Text and Multiline Text) and browser-based token authorization.
+1. **`record-paths-by-scene`**: Automatically changes the recording and Replay Buffer output path based on the active scene (supports horizontal/landscape and Aitum Vertical, includes automatic empty folder cleanup and support for clean naming). [Read more](record-paths-by-scene/README.md)
+2. **`twitch-stream-info`**: Configure and automatically update the stream title, category, and credentials in Twitch per scene, featuring an icon selector and settings import/export. [Read more](twitch-stream-info/README.md)
+3. **`twitch-event-actions`**: Unified engine for Twitch events in OBS, supporting chat actions (Text and Multiline Text) and browser-based token authorization. [Read more](twitch-event-actions/README.md)
 
 ## How it works
 
