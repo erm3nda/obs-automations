@@ -125,7 +125,7 @@ def script_properties():
     
     # Auth Group
     auth_props = obs.obs_properties_create()
-    obs.obs_properties_add_button(auth_props, "generate_token", "🌐 Abrir TwitchTokenGenerator.com (Manual)", on_generate_token)
+    obs.obs_properties_add_button(auth_props, "generate_token", "🌐 Abrir URL de Autorización Twitch", on_generate_token)
     obs.obs_properties_add_button(auth_props, "refresh_token_btn", "🔍 Comprobar Token", on_refresh_token)
     obs.obs_properties_add_button(auth_props, "force_refresh_button", "🔄 Forzar Refresco de Token", on_refresh_token)
     obs.obs_properties_add_button(auth_props, "get_id_button", "🔍 Detectar ID y Canal", on_get_broadcaster_id)
@@ -254,7 +254,14 @@ def on_refresh_token(properties, property):
     return True
 
 def on_generate_token(properties, property):
-    webbrowser.open("https://twitchtokengenerator.com/")
+    # Abrir la URL oficial de autorización de Twitch con los scopes configurados,
+    # para que el usuario solo tenga que aceptar y pegar el token.
+    scopes = twitch_scopes if twitch_scopes and twitch_scopes.strip() else "channel:manage:broadcast user:read:chat"
+    scopes_url = "%20".join([s.strip() for s in scopes.split() if s.strip()])
+    cid = client_id if client_id and client_id.strip() else "gp762nuuoqcoxypju8c569th9wz7q5"
+    auth_url = f"https://id.twitch.tv/oauth2/authorize?response_type=code&client_id={cid.strip()}&redirect_uri=https://twitchtokengenerator.com&scope={scopes_url}"
+    obs.script_log(obs.LOG_INFO, f"[Twitch-Event-Actions] Abriendo URL de autorización de Twitch: {auth_url}")
+    webbrowser.open(auth_url)
     return True
 
 def on_get_broadcaster_id(properties, property):
