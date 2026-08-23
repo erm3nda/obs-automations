@@ -1,6 +1,7 @@
 import obspython as obs
 import threading
 import socket
+import os
 import ssl
 import time
 import re
@@ -8,6 +9,8 @@ import urllib.request
 import json
 import webbrowser
 import textwrap
+import subprocess
+import sys
 
 # --- Variables Globales ---
 _script_settings = None
@@ -126,8 +129,12 @@ def script_properties():
     auth_props = obs.obs_properties_create()
     obs.obs_properties_add_button(auth_props, "smart_auth_button", "⚡ Autenticación Automática (Playwright)", run_smart_auth_wrapper)
     obs.obs_properties_add_button(auth_props, "generate_token", "🌐 Abrir TwitchTokenGenerator.com (Manual)", on_generate_token)
-    obs.obs_properties_add_button(auth_props, "refresh_token_btn", "Refrescar Token", on_refresh_token)
-    obs.obs_properties_add_button(auth_props, "get_id_button", "Detectar ID y Canal", on_get_broadcaster_id)
+    obs.obs_properties_add_button(auth_props, "refresh_token_btn", "🔍 Comprobar Token", on_refresh_token)
+    obs.obs_properties_add_button(auth_props, "force_refresh_button", "🔄 Forzar Refresco de Token", on_refresh_token)
+    obs.obs_properties_add_button(auth_props, "get_id_button", "🔍 Detectar ID y Canal", on_get_broadcaster_id)
+
+    obs.obs_properties_add_text(auth_props, "broadcaster_id", "Broadcaster ID", obs.OBS_TEXT_DEFAULT)
+    obs.obs_properties_add_text(auth_props, "chat_channel", "Canal de Chat", obs.OBS_TEXT_DEFAULT)
 
     obs.obs_properties_add_text(auth_props, "client_id", "Twitch Client ID", obs.OBS_TEXT_DEFAULT)
     obs.obs_properties_add_text(auth_props, "oauth_token", "Twitch OAuth Token", obs.OBS_TEXT_PASSWORD)
@@ -142,9 +149,9 @@ def script_properties():
         chat_props, "chat_target_type", "Tipo de Acción Chat",
         obs.OBS_COMBO_TYPE_LIST, obs.OBS_COMBO_FORMAT_INT
     )
-    obs.obs_property_list_add_int(p_chat_type, "Lista de chat acumulativa", 0)
+    obs.obs_property_list_add_int(p_chat_type, "Texto", 0)
     obs.obs_property_list_add_int(p_chat_type, "Mostrar/Ocultar Fuente o Escena", 1)
-    obs.obs_property_list_add_int(p_chat_type, "Actualizar Texto único", 2)
+    obs.obs_property_list_add_int(p_chat_type, "Texto multilinea", 2)
 
     p_chat_source = obs.obs_properties_add_list(
         chat_props, "chat_target_source", "Fuente/Escena de Chat",
@@ -184,6 +191,15 @@ def script_defaults(settings):
     obs.obs_data_set_default_string(settings, "oauth_token", "")
     obs.obs_data_set_default_string(settings, "refresh_token", "")
     obs.obs_data_set_default_string(settings, "twitch_scopes", "channel:manage:broadcast user:read:chat")
+    obs.obs_data_set_default_string(settings, "broadcaster_id", "")
+    obs.obs_data_set_default_string(settings, "chat_channel", "twitch_chat")
+    
+    obs.obs_data_set_default_bool(settings, "chat_enabled", False)
+    obs.obs_data_set_default_int(settings, "chat_target_type", 0)
+    obs.obs_data_set_default_string(settings, "chat_target_source", "twitch_chat")
+    obs.obs_data_set_default_int(settings, "chat_max_messages", 5)
+    obs.obs_data_set_default_int(settings, "chat_max_chars", 40)
+    obs.obs_data_set_default_int(settings, "chat_duration", 20)
 
 def run_smart_auth_wrapper(properties, property):
     """Ejecuta el script de autenticación inteligente en un proceso separado."""
@@ -192,15 +208,6 @@ def run_smart_auth_wrapper(properties, property):
     subprocess.Popen([sys.executable, script_path, "--smart", scopes])
     obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] Iniciando proceso de autenticación inteligente de Twitch...")
     return True
-    obs.obs_data_set_default_string(settings, "broadcaster_id", "")
-    obs.obs_data_set_default_string(settings, "chat_channel", "")
-    
-    obs.obs_data_set_default_bool(settings, "chat_enabled", False)
-    obs.obs_data_set_default_int(settings, "chat_target_type", 0)
-    obs.obs_data_set_default_string(settings, "chat_target_source", "twitch_chat")
-    obs.obs_data_set_default_int(settings, "chat_max_messages", 5)
-    obs.obs_data_set_default_int(settings, "chat_max_chars", 40)
-    obs.obs_data_set_default_int(settings, "chat_duration", 20)
 
 def script_update(settings):
     global enabled, _script_settings, client_id, oauth_token, refresh_token, twitch_scopes, broadcaster_id, chat_channel
