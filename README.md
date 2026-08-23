@@ -14,4 +14,4 @@ Cada plugin cuenta con su propio script de instalación en PowerShell (`install.
 Revisa la documentación específica dentro de cada carpeta para más información sobre requisitos y configuración.
 
 ---
-*Disclaimer: Este proyecto ha sido desarrollado principalmente con Gemini Flash (Google AI Studio) y, en menor medida, con modelos de Kilo.*
+*Disclaimer: This project was primarily developed using Gemini Flash (Google AI Studio) and, to a lesser extent, Kilo free models.*
