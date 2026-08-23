@@ -116,7 +116,7 @@ def open_manual_token_generator(properties=None, property=None):
 
 def script_properties():
     props = obs.obs_properties_create()
-    obs.obs_properties_add_bool(props, "enabled", "✅ Plugin Activo")
+    obs.obs_properties_add_bool(props, "enabled", "Plugin Activo")
     
     active_scene = get_active_scene_name()
     t_saved, c_saved = get_scene_data_from_obs(_script_settings, active_scene)
