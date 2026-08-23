@@ -15,11 +15,11 @@ Unified OBS plugin to automate actions based on real-time Twitch events.
 
 ## Installation
 
-Run `install.ps1` as Administrator or use `install-all.bat` from the root directory.
+**Option A (Recommended):** In OBS, go to **Tools → Scripts → [+]**, navigate to this folder and select `twitch-event-actions.py` directly.
 
-Then, in OBS: **Tools → Scripts → [+] → twitch-event-actions.py**.
+**Option B (Optional):** Run `install.ps1` as Administrator or use `install-all.bat` from the root directory to copy the script into the OBS scripts folder automatically. This is a convenience and not required — Option A works without it.
 
-**Note:** No external Python dependencies are required. Token authorization opens directly in your system browser.
+**Note:** No external Python dependencies are required. No `helpers/` folder or extra scripts needed. Token authorization opens directly in your system browser.
 
 ## Initial Configuration
 

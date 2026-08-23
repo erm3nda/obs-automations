@@ -38,15 +38,7 @@ try {
 
     Copy-Item -Path $sourceFile -Destination $destination -Force
     
-    # Copiar todos los archivos de la carpeta helpers a la carpeta de scripts de OBS
-    $helpersDir = Join-Path $PSScriptRoot "..\helpers"
-    
-    if (Test-Path $helpersDir) {
-        Get-ChildItem $helpersDir | Copy-Item -Destination $obsScriptsDir -Force
-        Write-Host "Helpers copiados a: $obsScriptsDir" -ForegroundColor Green
-    }
-    
-    Write-Host "Twitch Event Actions e instaladores instalados correctamente en:" -ForegroundColor Green
+    Write-Host "Twitch Event Actions instalado correctamente en:" -ForegroundColor Green
     Write-Host "  $destination" -ForegroundColor Green
     Write-Host "En OBS: Herramientas > Scripts > [+] > selecciona '$scriptName'" -ForegroundColor Cyan
 } catch {
