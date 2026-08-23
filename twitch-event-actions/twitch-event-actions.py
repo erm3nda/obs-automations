@@ -205,15 +205,14 @@ def script_defaults(settings):
     obs.obs_data_set_default_int(settings, "chat_duration", 20)
 
 def on_check_dependencies(properties, property):
-    """Verifica e instala dependencias ejecutando directamente el script de Python en modo visible (con consola) para mostrar el resultado al usuario."""
+    """Verifica dependencias tratando de importarlas directamente; si falta alguna, instala vía pip en un proceso oculto (CREATE_NO_WINDOW) y reporta resultados en OBS."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     install_py = os.path.join(script_dir, "twitch_login_install-deps.py")
-    
+
     if os.path.exists(install_py):
-        # Lanzar sin CREATE_NO_WINDOW para que aparezca la consola y el usuario vea claramente si faltaban o ya estaban instaladas.
         cmd = f'python "{install_py}"'
-        subprocess.Popen(cmd, cwd=script_dir)
-        obs.script_log(obs.LOG_INFO, f"[Twitch-Event-Actions] Abriendo consola de verificación/instalación de dependencias.")
+        subprocess.Popen(cmd, creationflags=0x08000000, cwd=script_dir)
+        obs.script_log(obs.LOG_INFO, f"[Twitch-Event-Actions] Verificación en curso. Revisa el log de OBS para resultados.")
     else:
         obs.script_log(obs.LOG_ERROR, f"[Twitch-Event-Actions] No se encontró el script en: {install_py}")
     return True
