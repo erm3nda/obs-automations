@@ -45,6 +45,79 @@ _chat_queue = []
 def script_description():
     return "Twitch Event Actions: Automatiza acciones en OBS basadas en eventos de Twitch."
 
+def on_export_settings(props, prop):
+    settings_dir = obs.obs_data_get_string(_script_settings, "settings_path")
+    if not settings_dir:
+        settings_dir = os.path.join(os.path.expanduser("~"), "Desktop")
+    export_path = os.path.join(settings_dir, "twitch-event-actions-settings.json")
+    
+    try:
+        config_data = {
+            "enabled": enabled,
+            "client_id": client_id,
+            "oauth_token": oauth_token,
+            "refresh_token": refresh_token,
+            "twitch_scopes": twitch_scopes,
+            "broadcaster_id": broadcaster_id,
+            "chat_channel": chat_channel,
+            "chat_enabled": chat_enabled,
+            "chat_target_type": chat_target_type,
+            "chat_target_source": chat_target_source,
+            "chat_max_messages": chat_max_messages,
+            "chat_max_chars": chat_max_chars,
+            "chat_duration": chat_duration
+        }
+        with open(export_path, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=4, ensure_ascii=False)
+        obs.script_log(obs.LOG_INFO, f"[Twitch-Event-Actions] ✓ Ajustes exportados a: {export_path}")
+    except Exception as e:
+        obs.script_log(obs.LOG_ERROR, f"[Twitch-Event-Actions] Error al exportar ajustes: {e}")
+    return True
+
+def on_import_settings(props, prop):
+    settings_dir = obs.obs_data_get_string(_script_settings, "settings_path")
+    if not settings_dir:
+        settings_dir = os.path.join(os.path.expanduser("~"), "Desktop")
+    import_path = os.path.join(settings_dir, "twitch-event-actions-settings.json")
+    
+    if not os.path.exists(import_path):
+        obs.script_log(obs.LOG_WARNING, f"[Twitch-Event-Actions] No se encontró archivo en: {import_path}")
+        return True
+        
+    try:
+        with open(import_path, "r", encoding="utf-8") as f:
+            config_data = json.load(f)
+        
+        target_settings = _script_settings if _script_settings else obs.obs_data_create()
+        
+        obs.obs_data_set_bool(target_settings, "enabled", config_data.get("enabled", True))
+        obs.obs_data_set_string(target_settings, "client_id", config_data.get("client_id", ""))
+        obs.obs_data_set_string(target_settings, "oauth_token", config_data.get("oauth_token", ""))
+        obs.obs_data_set_string(target_settings, "refresh_token", config_data.get("refresh_token", ""))
+        obs.obs_data_set_string(target_settings, "twitch_scopes", config_data.get("twitch_scopes", "channel:manage:broadcast user:read:chat"))
+        obs.obs_data_set_string(target_settings, "broadcaster_id", config_data.get("broadcaster_id", ""))
+        obs.obs_data_set_string(target_settings, "chat_channel", config_data.get("chat_channel", ""))
+        
+        obs.obs_data_set_bool(target_settings, "chat_enabled", config_data.get("chat_enabled", False))
+        obs.obs_data_set_int(target_settings, "chat_target_type", config_data.get("chat_target_type", 0))
+        obs.obs_data_set_string(target_settings, "chat_target_source", config_data.get("chat_target_source", "twitch_chat"))
+        obs.obs_data_set_int(target_settings, "chat_max_messages", config_data.get("chat_max_messages", 5))
+        obs.obs_data_set_int(target_settings, "chat_max_chars", config_data.get("chat_max_chars", 40))
+        obs.obs_data_set_int(target_settings, "chat_duration", config_data.get("chat_duration", 20))
+        
+        script_update(target_settings)
+        
+        if props:
+            obs.obs_properties_apply_settings(props, target_settings)
+        
+        if not _script_settings:
+            obs.obs_data_release(target_settings)
+
+        obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] ✓ Ajustes importados y aplicados correctamente desde el archivo JSON.")
+    except Exception as e:
+        obs.script_log(obs.LOG_ERROR, f"[Twitch-Event-Actions] Error al importar ajustes: {e}")
+    return True
+
 def script_properties():
     props = obs.obs_properties_create()
     obs.obs_properties_add_bool(props, "enabled", "Activar Script")
@@ -92,6 +165,17 @@ def script_properties():
     
     obs.obs_properties_add_group(props, "chat_actions", "⭐ Evento: Chat", obs.OBS_GROUP_NORMAL, chat_props)
     
+    # Crear un grupo para gestión de archivos de configuración
+    mng_props = obs.obs_properties_create()
+    obs.obs_properties_add_path(
+        mng_props, "settings_path", "Carpeta donde guardar ajustes",
+        obs.OBS_PATH_DIRECTORY, "",
+        os.path.join(os.path.expanduser("~"), "Desktop")
+    )
+    obs.obs_properties_add_button(mng_props, "export_btn", "💾 Guardar Ajustes", on_export_settings)
+    obs.obs_properties_add_button(mng_props, "import_btn", "📂 Cargar Ajustes", on_import_settings)
+    obs.obs_properties_add_group(props, "settings_mng", "Gestión de ajustes", obs.OBS_GROUP_NORMAL, mng_props)
+
     return props
 
 def script_defaults(settings):

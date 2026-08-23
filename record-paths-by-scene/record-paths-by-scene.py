@@ -181,11 +181,46 @@ def script_properties():
         if sc:
             scene_name = obs.obs_source_get_name(sc)
             obs.obs_source_release(sc)
-            folder_name = clean_name_for_folder(scene_name)
-            preview_str = os.path.join(base_folder if base_folder else "[Carpeta no definida]", folder_name)
-            obs.obs_property_set_description(prop, f"👁️ Vista previa: {preview_str.replace(os.sep, '/')}")
-        else:
-            obs.obs_property_set_description(prop, "👁️ Vista previa: [Sin escena activa]")
+            target, filename_format = set_paths_for_scene(scene_name, dry_run=True)
+            
+            # Obtener el contenedor / formato de grabación configurado en OBS
+            ext = ".mkv"
+            config = obs.obs_frontend_get_profile_config()
+            if config:
+                # Comprobar modo simple o avanzado
+                output_type = obs.config_get_string(config, "Output", "Mode")
+                if output_type == "Adv":
+                    rec_type = obs.config_get_string(config, "AdvOut", "RecType")
+                    if rec_type == "Standard":
+                        format_val = obs.config_get_string(config, "AdvOut", "RecFormat")
+                        if format_val:
+                            ext = "." + format_val.lower()
+                    else:
+                        ext = ".mp4" # FFMPEG por defecto o similar
+                else:
+                    format_val = obs.config_get_string(config, "SimpleOutput", "FilePath") # No, formato simple
+                    # En simple usa el contenedor configurado
+                    format_val = obs.config_get_string(config, "SimpleOutput", "RecQuality") # o RecFormat
+                    # Intentar leer directamente de output format si existe
+                    fmt = obs.config_get_string(config, "SimpleOutput", "RecFormat")
+                    if fmt:
+                        ext = "." + fmt.lower()
+
+            # Reemplazar los marcadores de OBS por algo legible para la vista previa (hora actual)
+            now = time.localtime()
+            preview_filename = filename_format.replace("%CCYY", time.strftime("%Y", now)) \
+                                            .replace("%MM", time.strftime("%m", now)) \
+                                            .replace("%DD", time.strftime("%d", now)) \
+                                            .replace("%hh", time.strftime("%H", now)) \
+                                            .replace("%mm", time.strftime("%M", now)) \
+                                            .replace("%ss", time.strftime("%S", now))
+            
+            preview_str = os.path.join(target, preview_filename + ext)
+            
+            p_display = obs.obs_properties_get(props, "preview_display")
+            obs.obs_property_set_modified_callback(p_display, lambda props, prop, settings: True)
+            obs.obs_data_set_string(_script_settings, "preview_display", preview_str.replace(os.sep, '/'))
+            obs.obs_properties_apply_settings(props, _script_settings)
         return True
 
     horizontal_props = obs.obs_properties_create()
@@ -205,6 +240,13 @@ def script_properties():
     )
     obs.obs_properties_add_button(
         horizontal_props, "preview_btn", "👁️ Actualizar Vista Previa de Ruta", on_preview_click
+    )
+    obs.obs_properties_add_text(
+        props, "preview_display", "Vista previa:",
+        obs.OBS_TEXT_DEFAULT
+    )
+    obs.obs_property_set_enabled(
+        obs.obs_properties_get(props, "preview_display"), False
     )
     obs.obs_properties_add_bool(
         horizontal_props, "keep_recording",
@@ -806,11 +848,27 @@ def get_vertical_config_path():
     )
     return config_path if os.path.isfile(config_path) else None
 
-def set_paths_for_scene(scene_name):
+def set_paths_for_scene(scene_name, dry_run=False):
     global _current_recording_folder, _vertical_target_folder, _vertical_source_scene
     
     folder_name = clean_name_for_folder(scene_name)
     target = os.path.join(base_folder, folder_name)
+    
+    # Aplicar formato al nombre del archivo
+    # Formato: "GameName %CCYY-%MM-%DD %hh-%mm-%ss"
+    file_prefix = clean_name_for_filename(scene_name)
+    
+    # Si el usuario define un formato, lo usamos.
+    # El usuario debe entender que "GameName" se añadirá automáticamente.
+    if base_filename_format:
+        new_format = file_prefix + " " + base_filename_format
+    else:
+        # Formato por defecto sugerido: "GameName YYYY-MM-DD hh-mm-ss"
+        new_format = file_prefix + " %CCYY-%MM-%DD %hh-%mm-%ss"
+
+    if dry_run:
+        return target, new_format
+
     ensure_folder(target)
     
     config = obs.obs_frontend_get_profile_config()
@@ -822,16 +880,20 @@ def set_paths_for_scene(scene_name):
     obs.config_set_string(config, "AdvOut", "RecFilePath", target)
     obs.config_set_string(config, "AdvOut", "FFFilePath",  target)
     
-    # Aplicar formato de Nvidia al nombre del archivo
-    # Nvidia usa: "GameName Replay YYYY.MM.DD - HH.MM.SS.DVR"
-    file_prefix = clean_name_for_filename(scene_name)
-    if base_filename_format:
-        new_format = file_prefix + " Replay " + base_filename_format
-    else:
-        new_format = file_prefix + " Replay %CCYY.%MM.%DD - %hh.%mm.%ss.DVR"
-    
     obs.config_set_string(config, "Output", "FilenameFormatting", new_format)
     obs.config_save_safe(config, "tmp", None)
+
+    # Si la carpeta anterior estaba vacía al cambiar de escena, la borramos
+    global _current_recording_folder
+    if _current_recording_folder and _current_recording_folder != target:
+        if os.path.isdir(_current_recording_folder):
+            try:
+                if not os.listdir(_current_recording_folder):
+                    os.rmdir(_current_recording_folder)
+                    obs.script_log(obs.LOG_INFO, f"Carpeta vacía anterior eliminada: {_current_recording_folder}")
+            except OSError:
+                pass
+
     _current_recording_folder = target
     _vertical_target_folder = target
     _vertical_source_scene = scene_name

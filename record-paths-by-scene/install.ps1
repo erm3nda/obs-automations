@@ -1,5 +1,5 @@
 # install.ps1
-# Copia set-escene-path.py al directorio de scripts de OBS Studio.
+# Copia record-paths-by-scene.py al directorio de scripts de OBS Studio.
 # Compatible con cualquier usuario y cualquier instalacion estandar de OBS.
 
 # Verificar si se ejecuta como Administrador, si no, autoelevarse
@@ -11,7 +11,7 @@ if (-not $isAdmin -and -not $env:OBS_AUTO_INSTALL_RUNNING) {
 }
 
 
-$scriptName  = "set-escene-path.py"
+$scriptName  = "record-paths-by-scene.py"
 $sourceFile  = Join-Path $PSScriptRoot $scriptName
 $obsScriptsDir = Join-Path $env:ProgramFiles "obs-studio\data\obs-plugins\frontend-tools\scripts"
 $destination = Join-Path $obsScriptsDir $scriptName

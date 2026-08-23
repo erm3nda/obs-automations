@@ -1,4 +1,4 @@
-# set-stream-info
+# Set-Stream-Info
 
 Plugin de OBS Studio para actualizar automáticamente el **título**, **descripción** y **categoría/juego** de la transmisión.
 

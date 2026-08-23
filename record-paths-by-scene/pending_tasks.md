@@ -1,4 +1,4 @@
-# Mejores Pendientes para set-escene-paths
+# Mejores Pendientes para record-paths-by-scene
 
 ## 1. Detección automática del ejecutable / juego activo (NVIDIA App/GeForce Experience compatibility)
 - **Idea:** En lugar de depender únicamente del nombre de la escena en OBS o del mapa estático `SCENE_ALIASES`, inspeccionar las fuentes de la escena activa (específicamente la fuente de tipo **Game Capture** / **Captura de Juego** o **Window Capture** / **Captura de Ventana**).

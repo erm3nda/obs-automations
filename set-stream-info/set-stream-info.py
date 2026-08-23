@@ -87,7 +87,7 @@ def script_description():
     scene_name = get_active_scene_name()
     return (
         "<b>Set-Stream-Info</b><br>"
-        "Edita y aplica la información del directo para cada escena sin archivos externos.<br>"
+        "Edita y aplica la información del directo en Twitch para cada escena sin archivos externos.<br>"
         f"• <b>Escena activa actual:</b> <code>{scene_name if scene_name else 'Ninguna'}</code><br><br>"
         "Si no defines un título específico, se usará automáticamente el nombre de la escena más la coletilla global."
     )
@@ -112,14 +112,6 @@ def open_manual_token_generator(properties=None, property=None):
     auth_url = f"https://id.twitch.tv/oauth2/authorize?response_type=code&client_id={client_id}&redirect_uri=https://twitchtokengenerator.com&scope={scopes_url}"
     obs.script_log(obs.LOG_INFO, f"[Set-Stream-Info] Abriendo generador de token en el navegador: {auth_url}")
     webbrowser.open(auth_url)
-    return True
-
-def run_smart_auth_wrapper(properties, property):
-    """Ejecuta el script de autenticación inteligente en un proceso separado."""
-    script_path = os.path.join(os.path.dirname(__file__), "twitch_login.py")
-    scopes = obs.obs_data_get_string(_script_settings, "twitch_scopes") or "channel:manage:broadcast user:read:chat"
-    subprocess.Popen([sys.executable, script_path, "--smart", scopes])
-    obs.script_log(obs.LOG_INFO, "[Set-Stream-Info] Iniciando proceso de autenticación inteligente de Twitch...")
     return True
 
 def run_smart_auth_wrapper(properties, property):
@@ -207,6 +199,17 @@ def script_properties():
 
     obs.obs_properties_add_int(scene_props, "delay_seconds", "Segundos de retardo", 5, 3600, 5)
     obs.obs_properties_add_button(scene_props, "apply_button", "Aplicar y guardar escena activa", on_apply_clicked)
+    
+    # Bloque de Gestión de Ajustes (Configuración global)
+    mng_props = obs.obs_properties_create()
+    obs.obs_properties_add_path(
+        mng_props, "settings_path", "Carpeta donde guardar ajustes",
+        obs.OBS_PATH_DIRECTORY, "",
+        os.path.join(os.path.expanduser("~"), "Desktop")
+    )
+    obs.obs_properties_add_button(mng_props, "export_btn", "💾 Guardar Ajustes", on_export_settings)
+    obs.obs_properties_add_button(mng_props, "import_btn", "📂 Cargar Ajustes", on_import_settings)
+    obs.obs_properties_add_group(props, "settings_mng", "Gestión de ajustes", obs.OBS_GROUP_NORMAL, mng_props)
     
     obs.obs_properties_add_group(
         props, "scene_group", "📺 Configuración de Escenas y Directo",
@@ -600,6 +603,86 @@ def update_stream_info_helix(title, category):
 
 def on_apply_clicked(properties, property):
     execute_stream_info_update()
+
+def on_export_settings(props, prop):
+    settings_dir = obs.obs_data_get_string(_script_settings, "settings_path")
+    if not settings_dir:
+        settings_dir = os.path.join(os.path.expanduser("~"), "Desktop")
+    export_path = os.path.join(settings_dir, "set-stream-info-settings.json")
+    
+    try:
+        scene_map = obs.obs_data_get_obj(_script_settings, "scene_map")
+        scene_map_json = obs.obs_data_get_json(scene_map) if scene_map else "{}"
+        if scene_map:
+            obs.obs_data_release(scene_map)
+            
+        config_data = {
+            "enabled": enabled,
+            "block_if_streaming": block_if_streaming,
+            "update_mode": update_mode,
+            "delay_seconds": delay_seconds,
+            "global_suffix": global_suffix,
+            "twitch_client_id": twitch_client_id,
+            "twitch_client_secret": twitch_client_secret,
+            "twitch_oauth_token": twitch_oauth_token,
+            "twitch_refresh_token": twitch_refresh_token,
+            "twitch_scopes": twitch_scopes,
+            "broadcaster_id": broadcaster_id,
+            "scene_map": json.loads(scene_map_json)
+        }
+        with open(export_path, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=4, ensure_ascii=False)
+        obs.script_log(obs.LOG_INFO, f"[Set-Stream-Info] ✓ Ajustes exportados a: {export_path}")
+    except Exception as e:
+        obs.script_log(obs.LOG_ERROR, f"[Set-Stream-Info] Error al exportar ajustes: {e}")
+    return True
+
+def on_import_settings(props, prop):
+    settings_dir = obs.obs_data_get_string(_script_settings, "settings_path")
+    if not settings_dir:
+        settings_dir = os.path.join(os.path.expanduser("~"), "Desktop")
+    import_path = os.path.join(settings_dir, "set-stream-info-settings.json")
+    
+    if not os.path.exists(import_path):
+        obs.script_log(obs.LOG_WARNING, f"[Set-Stream-Info] No se encontró el archivo de ajustes en: {import_path}")
+        return True
+        
+    try:
+        with open(import_path, "r", encoding="utf-8") as f:
+            config_data = json.load(f)
+        
+        target_settings = _script_settings if _script_settings else obs.obs_data_create()
+        
+        obs.obs_data_set_bool(target_settings, "enabled", config_data.get("enabled", True))
+        obs.obs_data_set_bool(target_settings, "block_if_streaming", config_data.get("block_if_streaming", False))
+        obs.obs_data_set_int(target_settings, "update_mode", config_data.get("update_mode", 1))
+        obs.obs_data_set_int(target_settings, "delay_seconds", config_data.get("delay_seconds", 60))
+        obs.obs_data_set_string(target_settings, "global_suffix", config_data.get("global_suffix", ". No commentary. Bring your own music."))
+        obs.obs_data_set_string(target_settings, "twitch_client_id", config_data.get("twitch_client_id", ""))
+        obs.obs_data_set_string(target_settings, "twitch_client_secret", config_data.get("twitch_client_secret", ""))
+        obs.obs_data_set_string(target_settings, "twitch_oauth_token", config_data.get("twitch_oauth_token", ""))
+        obs.obs_data_set_string(target_settings, "twitch_refresh_token", config_data.get("twitch_refresh_token", ""))
+        obs.obs_data_set_string(target_settings, "twitch_scopes", config_data.get("twitch_scopes", "channel:manage:broadcast user:read:chat"))
+        obs.obs_data_set_string(target_settings, "broadcaster_id", config_data.get("broadcaster_id", ""))
+        
+        if "scene_map" in config_data:
+            scene_map_str = json.dumps(config_data["scene_map"])
+            scene_map = obs.obs_data_create_from_json(scene_map_str)
+            obs.obs_data_set_obj(target_settings, "scene_map", scene_map)
+            obs.obs_data_release(scene_map)
+            
+        script_update(target_settings)
+        
+        if props:
+            obs.obs_properties_apply_settings(props, target_settings)
+        
+        if not _script_settings:
+            obs.obs_data_release(target_settings)
+
+        obs.script_log(obs.LOG_INFO, "[Set-Stream-Info] ✓ Ajustes importados y aplicados correctamente desde el archivo JSON.")
+    except Exception as e:
+        obs.script_log(obs.LOG_ERROR, f"[Set-Stream-Info] Error al importar ajustes: {e}")
+    return True
 
 def handle_scene_changed():
     """Maneja el evento de cambio de escena refrescando la UI de OBS y aplicando actualización."""

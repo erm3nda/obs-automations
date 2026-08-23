@@ -1,5 +1,5 @@
 # install.ps1
-# Copia set-stream-info.py y stream_info.json al directorio de scripts de OBS Studio.
+# Copia Set-Stream-Info.py y stream_info.json al directorio de scripts de OBS Studio.
 
 # Evitar elevación si ya se ejecuta como Admin o se invoca desde el maestro
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -19,7 +19,7 @@ if (-not (Test-Path $obsScriptsDir)) {
 
 try {
     # Copiar script Python
-    Copy-Item -Path (Join-Path $PSScriptRoot "set-stream-info.py") -Destination (Join-Path $obsScriptsDir "set-stream-info.py") -Force
+    Copy-Item -Path (Join-Path $PSScriptRoot "Set-Stream-Info.py") -Destination (Join-Path $obsScriptsDir "Set-Stream-Info.py") -Force
     
     # Copiar archivo stream_info.json si existe
     $jsonFile = Join-Path $PSScriptRoot "stream_info.json"
