@@ -9,8 +9,6 @@ import urllib.request
 import json
 import webbrowser
 import textwrap
-import subprocess
-import sys
 
 # --- Variables Globales ---
 _script_settings = None
@@ -20,7 +18,6 @@ _irc_socket = None
 _active_hide_timers = {}
 _chat_message_history = []
 _test_msg_counter = 0
-_playwright_proc = None
 
 # Variables de configuración
 enabled = True
@@ -128,9 +125,6 @@ def script_properties():
     
     # Auth Group
     auth_props = obs.obs_properties_create()
-    obs.obs_properties_add_bool(auth_props, "playwright_visible", "👀 Navegador Visible (No Headless)")
-    obs.obs_properties_add_button(auth_props, "check_deps", "🔍 Verificar/Instalar Dependencias", on_check_dependencies)
-    obs.obs_properties_add_button(auth_props, "smart_auth_button", "⚡ Autenticación Automática (Playwright)", run_smart_auth_wrapper)
     obs.obs_properties_add_button(auth_props, "generate_token", "🌐 Abrir TwitchTokenGenerator.com (Manual)", on_generate_token)
     obs.obs_properties_add_button(auth_props, "refresh_token_btn", "🔍 Comprobar Token", on_refresh_token)
     obs.obs_properties_add_button(auth_props, "force_refresh_button", "🔄 Forzar Refresco de Token", on_refresh_token)
@@ -204,48 +198,6 @@ def script_defaults(settings):
     obs.obs_data_set_default_int(settings, "chat_max_chars", 40)
     obs.obs_data_set_default_int(settings, "chat_duration", 20)
 
-def on_check_dependencies(properties, property):
-    """Verifica dependencias tratando de importarlas directamente; si falta alguna, instala vía pip en un proceso oculto (CREATE_NO_WINDOW) y reporta resultados en OBS."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    install_py = os.path.join(script_dir, "twitch_login_install-deps.py")
-
-    if os.path.exists(install_py):
-        cmd = f'python "{install_py}"'
-        subprocess.Popen(cmd, creationflags=0x08000000, cwd=script_dir)
-        obs.script_log(obs.LOG_INFO, f"[Twitch-Event-Actions] Verificación en curso. Revisa el log de OBS para resultados.")
-    else:
-        obs.script_log(obs.LOG_ERROR, f"[Twitch-Event-Actions] No se encontró el script en: {install_py}")
-    return True
-
-def run_smart_auth_wrapper(properties, property):
-    """Ejecuta el script de autenticación inteligente en un proceso separado."""
-    global _playwright_proc
-    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "twitch_login.py")
-    
-    scopes = obs.obs_data_get_string(_script_settings, "twitch_scopes") or "channel:manage:broadcast user:read:chat"
-    visible = obs.obs_data_get_bool(_script_settings, "playwright_visible")
-    
-    # sys.executable en OBS es obs64.exe, lo cual intenta reabrir OBS.
-    # Necesitamos usar el ejecutable 'python' del sistema.
-    # Usar CREATE_NO_WINDOW (0x08000000) en Windows para evitar la molesta ventana negra de consola,
-    # a menos que el usuario haya marcado explícitamente que quiere ver el proceso de playwright (visible).
-    creationflags = 0
-    if not visible:
-        creationflags = 0x08000000 # CREATE_NO_WINDOW
-        
-    args = ["python", script_path, "--smart", scopes]
-    if visible:
-        args.append("--visible")
-        
-    _playwright_proc = subprocess.Popen(args, creationflags=creationflags)
-    obs.script_log(obs.LOG_INFO, f"[Twitch-Event-Actions] Lanzando proceso externo: {' '.join(args)}")
-    return True
-
-def script_unload():
-    global _playwright_proc
-    if _playwright_proc and _playwright_proc.poll() is None:
-        _playwright_proc.terminate()
-        obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] Proceso de Playwright terminado al cerrar OBS.")
 
 def script_update(settings):
     global enabled, _script_settings, client_id, oauth_token, refresh_token, twitch_scopes, broadcaster_id, chat_channel

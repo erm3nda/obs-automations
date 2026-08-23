@@ -7,8 +7,6 @@ import threading
 import re
 import webbrowser
 import os
-import subprocess
-import sys
 import time
 
 PLUGIN_NAME = "Twitch-Stream-Info"
@@ -29,7 +27,6 @@ twitch_scopes        = "channel:manage:broadcast"
 
 _script_settings     = None
 is_first_load        = True
-_playwright_proc     = None
 
 def clean_scene_name(name):
     """Extrae el nombre limpio del juego a partir de la escena."""
@@ -116,37 +113,6 @@ def open_manual_token_generator(properties=None, property=None):
     webbrowser.open(auth_url)
     return True
 
-def on_check_dependencies(properties, property):
-    """Verifica e instala dependencias ejecutando directamente el script de Python en modo visible (con consola) para mostrar el resultado al usuario."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    install_py = os.path.join(script_dir, "twitch_login_install-deps.py")
-    
-    if os.path.exists(install_py):
-        # Lanzar sin CREATE_NO_WINDOW para que aparezca la consola y el usuario vea claramente si faltaban o ya estaban instaladas.
-        cmd = f'python "{install_py}"'
-        subprocess.Popen(cmd, cwd=script_dir)
-        obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Abriendo consola de verificación/instalación de dependencias.")
-    else:
-        obs.script_log(obs.LOG_ERROR, f"[{PLUGIN_NAME}] No se encontró el script en: {install_py}")
-    return True
-
-def run_smart_auth_wrapper(properties, property):
-    global _playwright_proc
-    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "twitch_login.py")
-    scopes = obs.obs_data_get_string(_script_settings, "twitch_scopes") or "channel:manage:broadcast user:read:chat"
-    visible = obs.obs_data_get_bool(_script_settings, "playwright_visible")
-    
-    creationflags = 0
-    if not visible:
-        creationflags = 0x08000000 # CREATE_NO_WINDOW
-        
-    args = ["python", script_path, "--smart", scopes]
-    if visible:
-        args.append("--visible")
-        
-    _playwright_proc = subprocess.Popen(args, creationflags=creationflags)
-    obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Lanzando proceso externo: {' '.join(args)}")
-    return True
 
 def script_properties():
     props = obs.obs_properties_create()
@@ -243,9 +209,6 @@ def script_properties():
     p_scopes = obs.obs_properties_add_text(twitch_props, "twitch_scopes", "Scopes de Twitch", obs.OBS_TEXT_DEFAULT)
     obs.obs_property_set_modified_callback(p_scopes, lambda props, prop, settings: True)
     
-    obs.obs_properties_add_bool(twitch_props, "playwright_visible", "👀 Navegador Visible (No Headless)")
-    obs.obs_properties_add_button(twitch_props, "check_deps", "🔍 Verificar/Instalar Dependencias", on_check_dependencies)
-    obs.obs_properties_add_button(twitch_props, "smart_auth_button", "⚡ Autenticación Automática (Playwright)", run_smart_auth_wrapper)
     obs.obs_properties_add_button(twitch_props, "manual_generate_button", "🌐 Abrir TwitchTokenGenerator.com (Manual)", open_manual_token_generator)
     obs.obs_properties_add_button(twitch_props, "refresh_token_button", "🔍 Comprobar Token", on_refresh_button_clicked)
     obs.obs_properties_add_button(twitch_props, "force_refresh_button", "🔄 Forzar Refresco de Token", on_force_refresh_clicked)
@@ -535,11 +498,4 @@ def script_load(settings):
 def script_unload():
     obs.timer_remove(execute_stream_info_update)
     obs.timer_remove(run_proactive_refresh)
-    global _playwright_proc
-    if _playwright_proc is not None:
-        try:
-            _playwright_proc.terminate()
-        except Exception:
-            _playwright_proc.kill()
-        _playwright_proc = None
     obs.script_log(obs.LOG_INFO, f"{PLUGIN_NAME} descargado.")
