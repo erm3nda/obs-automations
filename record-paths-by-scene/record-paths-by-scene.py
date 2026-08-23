@@ -94,7 +94,7 @@ def on_export_settings(props, prop):
     settings_dir = obs.obs_data_get_string(_script_settings, "settings_path")
     if not settings_dir:
         settings_dir = os.path.join(os.path.expanduser("~"), "Desktop")
-    export_path = os.path.join(settings_dir, "record-paths-by-scene-settings.json")
+    export_path = os.path.join(settings_dir, "record-paths-by-scene.json")
     
     try:
         config_data = {
@@ -128,7 +128,7 @@ def on_import_settings(props, prop):
     settings_dir = obs.obs_data_get_string(_script_settings, "settings_path")
     if not settings_dir:
         settings_dir = os.path.join(os.path.expanduser("~"), "Desktop")
-    import_path = os.path.join(settings_dir, "record-paths-by-scene-settings.json")
+    import_path = os.path.join(settings_dir, "record-paths-by-scene.json")
     
     if not os.path.exists(import_path):
         obs.script_log(obs.LOG_WARNING, "No se encontró archivo en: {}".format(import_path))
