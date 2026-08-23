@@ -1,4 +1,4 @@
-# set-escene-path
+# Record Paths by Scene
 
 OBS Studio script that automatically sets the **recording** and **replay buffer** output path when switching scenes.
 
@@ -15,7 +15,7 @@ Run `install.ps1` as Administrator. It copies the script to:
 ```
 %ProgramFiles%\obs-studio\data\obs-plugins\frontend-tools\scripts\
 ```
-Then in OBS: **Tools → Scripts → [+] → set-escene-path.py**
+Then in OBS: **Tools → Scripts → [+] → record-paths-by-scene.py**
 
 ## Options
 
