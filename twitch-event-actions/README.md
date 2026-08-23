@@ -19,6 +19,8 @@ Run `install.ps1` as Administrator or use `install-all.bat` from the root direct
 
 Then, in OBS: **Tools → Scripts → [+] → twitch-event-actions.py**.
 
+**Note:** Some advanced automation features (like Playwright integration for authentication) require Python dependencies. Ensure you have the necessary environment set up to run these background processes.
+
 ## Initial Configuration
 
 1. Ensure your Twitch credentials are set in the configuration tab (using the "Detect ID and Channel" button after authenticating is recommended).

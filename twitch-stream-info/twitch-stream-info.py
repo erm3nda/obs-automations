@@ -290,8 +290,8 @@ def script_update(settings):
         last_refresh = obs.obs_data_get_int(settings, "last_refresh_timestamp")
         current_time = int(time.time())
         if twitch_refresh_token and (last_refresh == 0 or (current_time - last_refresh) > 14 * 86400):
-            obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] El token no se ha refrescado en 14 días o es la primera carga. Programando refresco proactivo...")
-            obs.timer_add(run_proactive_refresh, 1000)
+            obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Programando refresco proactivo diferido...")
+            obs.timer_add(run_proactive_refresh, 30000)
 
 def execute_stream_info_update(update_category=True):
     if not enabled: return
@@ -488,7 +488,7 @@ def on_event(event):
     if event == obs.OBS_FRONTEND_EVENT_SCENE_CHANGED: handle_scene_changed()
 
 def check_obs_twitch_integration():
-    if not twitch_oauth_token: open_manual_token_generator(); return
+    if not twitch_oauth_token: return
     headers = {"Client-ID": twitch_client_id, "Authorization": f"Bearer {twitch_oauth_token.replace('oauth:', '').strip()}", "Content-Type": "application/json"}
     url = "https://api.twitch.tv/helix/users"
     try:

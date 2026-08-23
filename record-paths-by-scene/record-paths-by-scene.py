@@ -174,7 +174,7 @@ def on_import_settings(props, prop):
 
 def script_properties():
     props = obs.obs_properties_create()
-    obs.obs_properties_add_bool(props, "enabled", "✅ Plugin Activo")
+    obs.obs_properties_add_bool(props, "enabled", "Plugin Activo")
     
     def on_preview_click(props, prop):
         sc = obs.obs_frontend_get_current_scene()
@@ -547,7 +547,7 @@ def aitum_vendor_request(request_type, request_data=None):
         }
     }
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(2.0)
+    sock.settimeout(5.0)
     try:
         sock.connect(("127.0.0.1", 4455))
         key = base64.b64encode(os.urandom(16)).decode("ascii")
@@ -605,7 +605,7 @@ def aitum_vendor_request(request_type, request_data=None):
                 vendor_response = message.get("d", {}).get("responseData", {})
                 return vendor_response.get("responseData", vendor_response)
     except Exception as error:
-        obs.script_log(obs.LOG_WARNING, "Aitum Vertical WebSocket: {}".format(error))
+        obs.script_log(obs.LOG_WARNING, "Aitum Vertical WebSocket Error: {}".format(error))
     finally:
         sock.close()
     return None

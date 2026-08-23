@@ -204,6 +204,8 @@ def script_defaults(settings):
 def run_smart_auth_wrapper(properties, property):
     """Ejecuta el script de autenticación inteligente en un proceso separado."""
     script_path = os.path.join(os.path.dirname(__file__), "twitch_login.py")
+    if not os.path.exists(script_path):
+        script_path = os.path.join(os.path.dirname(__file__), "..", "helpers", "twitch_login.py")
     scopes = obs.obs_data_get_string(_script_settings, "twitch_scopes") or "channel:manage:broadcast user:read:chat"
     subprocess.Popen([sys.executable, script_path, "--smart", scopes])
     obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] Iniciando proceso de autenticación inteligente de Twitch...")
@@ -229,6 +231,13 @@ def script_update(settings):
     chat_max_chars = obs.obs_data_get_int(settings, "chat_max_chars")
     chat_duration = obs.obs_data_get_int(settings, "chat_duration")
 
+    last_refresh = obs.obs_data_get_int(settings, "last_refresh_timestamp")
+    current_time = int(time.time())
+    if refresh_token and (last_refresh == 0 or (current_time - last_refresh) > 14 * 86400):
+        obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] Verificando token (más de 14 días sin refrescar o primera vez)...")
+        on_refresh_token(None, None)
+        obs.obs_data_set_int(settings, "last_refresh_timestamp", current_time)
+
     _restart_irc_listener()
 
 def on_refresh_token(properties, property):
@@ -248,6 +257,7 @@ def on_refresh_token(properties, property):
             if _script_settings:
                 obs.obs_data_set_string(_script_settings, "oauth_token", oauth_token)
                 obs.obs_data_set_string(_script_settings, "refresh_token", refresh_token)
+                obs.obs_data_set_int(_script_settings, "last_refresh_timestamp", int(time.time()))
             obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] Token refrescado con éxito.")
         else:
             obs.script_log(obs.LOG_ERROR, f"[Twitch-Event-Actions] Error al refrescar: {data.get('message', 'Desconocido')}")
@@ -272,12 +282,15 @@ def on_get_broadcaster_id(properties, property):
         if users:
             broadcaster_id = users[0].get("id", "")
             chat_channel = users[0].get("login", "")
+            obs.script_log(obs.LOG_INFO, f"[Twitch-Event-Actions] ✓ ID detectado: {broadcaster_id} | Canal: {chat_channel}")
             if _script_settings:
                 obs.obs_data_set_string(_script_settings, "broadcaster_id", broadcaster_id)
                 obs.obs_data_set_string(_script_settings, "chat_channel", chat_channel)
             _restart_irc_listener()
-    except:
-        pass
+        else:
+            obs.script_log(obs.LOG_WARNING, "[Twitch-Event-Actions] ⚠️ No se pudieron obtener los datos de usuario.")
+    except Exception as e:
+        obs.script_log(obs.LOG_ERROR, f"[Twitch-Event-Actions] ❌ Error detectando ID: {e}")
     return True
 
 def _update_source_text(source_name, text):

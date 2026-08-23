@@ -14,6 +14,8 @@ OBS Studio plugin to manage stream information on Twitch, customizable per scene
 
 Run `install.ps1` as Administrator to copy the script to the OBS Studio scripts folder. Then, in OBS: **Tools → Scripts → [+] → twitch-stream-info.py**.
 
+**Note:** This plugin includes optional automation features (like smart authentication) that may require external Python dependencies such as Playwright.
+
 ## Configuration
 
 From the script panel in OBS, you can configure:
