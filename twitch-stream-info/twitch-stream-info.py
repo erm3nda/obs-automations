@@ -206,7 +206,7 @@ def script_properties():
     obs.obs_property_list_add_int(list_mode, "⏱ Cambiar con Retardo", 2)
 
     obs.obs_properties_add_int(scene_props, "delay_seconds", "Segundos de retardo", 5, 3600, 5)
-    obs.obs_properties_add_button(scene_props, "apply_button", "Aplicar y guardar escena activa", on_apply_clicked)
+    obs.obs_properties_add_button(scene_props, "apply_button", "⚡ Aplicar y Actualizar Info", on_apply_clicked)
     
     obs.obs_properties_add_group(props, "scene_group", "📺 Configuración de Escenas y Directo", obs.OBS_GROUP_NORMAL, scene_props)
 
