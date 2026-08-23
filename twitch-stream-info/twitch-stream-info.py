@@ -29,6 +29,7 @@ twitch_scopes        = "channel:manage:broadcast"
 
 _script_settings     = None
 is_first_load        = True
+_playwright_proc     = None
 
 def clean_scene_name(name):
     """Extrae el nombre limpio del juego a partir de la escena."""
@@ -113,6 +114,20 @@ def open_manual_token_generator(properties=None, property=None):
     auth_url = f"https://id.twitch.tv/oauth2/authorize?response_type=code&client_id={client_id}&redirect_uri=https://twitchtokengenerator.com&scope={scopes_url}"
     obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Abriendo generador de token en el navegador: {auth_url}")
     webbrowser.open(auth_url)
+    return True
+
+def on_check_dependencies(properties, property):
+    """Verifica e instala dependencias ejecutando directamente el script de Python en modo visible (con consola) para mostrar el resultado al usuario."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    install_py = os.path.join(script_dir, "twitch_login_install-deps.py")
+    
+    if os.path.exists(install_py):
+        # Lanzar sin CREATE_NO_WINDOW para que aparezca la consola y el usuario vea claramente si faltaban o ya estaban instaladas.
+        cmd = f'python "{install_py}"'
+        subprocess.Popen(cmd, cwd=script_dir)
+        obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Abriendo consola de verificación/instalación de dependencias.")
+    else:
+        obs.script_log(obs.LOG_ERROR, f"[{PLUGIN_NAME}] No se encontró el script en: {install_py}")
     return True
 
 def run_smart_auth_wrapper(properties, property):
@@ -520,4 +535,11 @@ def script_load(settings):
 def script_unload():
     obs.timer_remove(execute_stream_info_update)
     obs.timer_remove(run_proactive_refresh)
+    global _playwright_proc
+    if _playwright_proc is not None:
+        try:
+            _playwright_proc.terminate()
+        except Exception:
+            _playwright_proc.kill()
+        _playwright_proc = None
     obs.script_log(obs.LOG_INFO, f"{PLUGIN_NAME} descargado.")
