@@ -1,5 +1,5 @@
 # install.ps1
-# Copia Set-Stream-Info.py y stream_info.json al directorio de scripts de OBS Studio.
+# Copia twitch-stream-info.py y twitch-stream-info.json al directorio de scripts de OBS Studio.
 
 # Evitar elevación si ya se ejecuta como Admin o se invoca desde el maestro
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -19,19 +19,19 @@ if (-not (Test-Path $obsScriptsDir)) {
 
 try {
     # Copiar script Python
-    Copy-Item -Path (Join-Path $PSScriptRoot "Set-Stream-Info.py") -Destination (Join-Path $obsScriptsDir "Set-Stream-Info.py") -Force
+    Copy-Item -Path (Join-Path $PSScriptRoot "twitch-stream-info.py") -Destination (Join-Path $obsScriptsDir "twitch-stream-info.py") -Force
     
-    # Copiar archivo stream_info.json si existe
-    $jsonFile = Join-Path $PSScriptRoot "stream_info.json"
+    # Copiar archivo twitch-stream-info.json si existe
+    $jsonFile = Join-Path $PSScriptRoot "twitch-stream-info.json"
     if (Test-Path $jsonFile) {
-        Copy-Item -Path $jsonFile -Destination (Join-Path $obsScriptsDir "stream_info.json") -Force
+        Copy-Item -Path $jsonFile -Destination (Join-Path $obsScriptsDir "twitch-stream-info.json") -Force
     }
 
 
 
-    Write-Host "Set-Stream-Info instalado correctamente en:" -ForegroundColor Green
+    Write-Host "twitch-stream-info instalado correctamente en:" -ForegroundColor Green
     Write-Host "  $obsScriptsDir" -ForegroundColor Green
 } catch {
-    Write-Error "Error al copiar Set-Stream-Info: $_"
+    Write-Error "Error al copiar twitch-stream-info: $_"
     exit 1
 }
