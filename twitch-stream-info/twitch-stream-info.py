@@ -13,6 +13,7 @@ import time
 
 PLUGIN_NAME = "Twitch-Stream-Info"
 SETTINGS_FILENAME = "twitch-stream-info.json"
+ICONS = ["🎮", "🚗", "🏍️", "⚽", "✈️", "🥊", "🔫"]
 
 # ─── Config defaults ──────────────────────────────────────────────────────────
 block_if_streaming   = False   # Casilla: NO cambiar nada si se está emitiendo en directo
@@ -132,6 +133,25 @@ def script_properties():
     p_title = obs.obs_properties_add_text(
         scene_props, "current_scene_title", "Título de la escena", obs.OBS_TEXT_DEFAULT
     )
+
+    # Selector de iconos
+    def on_add_icon(props, prop):
+        # En el callback, 'props' es la instancia de obs_properties_t,
+        # pero para obtener/setear datos necesitamos el objeto settings actual.
+        title = obs.obs_data_get_string(_script_settings, "current_scene_title")
+        icon = obs.obs_data_get_string(_script_settings, "icon_selector")
+        if icon:
+            new_title = f"{title}{icon}"
+            obs.obs_data_set_string(_script_settings, "current_scene_title", new_title)
+            # Refrescar la interfaz para que el campo de texto se actualice
+            obs.obs_properties_apply_settings(props, _script_settings)
+        return True
+
+    p_icon_list = obs.obs_properties_add_list(scene_props, "icon_selector", "Selector de iconos", obs.OBS_COMBO_TYPE_LIST, obs.OBS_COMBO_FORMAT_STRING)
+    for ic in ICONS:
+        obs.obs_property_list_add_string(p_icon_list, ic, ic)
+    obs.obs_properties_add_button(scene_props, "add_icon_btn", "➕ Añadir icono al título", on_add_icon)
+
     p_cat = obs.obs_properties_add_list(
         scene_props, "current_scene_category", "Categoría de la escena",
         obs.OBS_COMBO_TYPE_EDITABLE, obs.OBS_COMBO_FORMAT_STRING
