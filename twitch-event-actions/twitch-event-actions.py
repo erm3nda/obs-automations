@@ -51,13 +51,15 @@ def script_properties():
     
     # Auth Group
     auth_props = obs.obs_properties_create()
+    obs.obs_properties_add_button(auth_props, "smart_auth_button", "⚡ Autenticación Automática (Playwright)", run_smart_auth_wrapper)
+    obs.obs_properties_add_button(auth_props, "generate_token", "🌐 Abrir TwitchTokenGenerator.com (Manual)", on_generate_token)
+    obs.obs_properties_add_button(auth_props, "refresh_token_btn", "Refrescar Token", on_refresh_token)
+    obs.obs_properties_add_button(auth_props, "get_id_button", "Detectar ID y Canal", on_get_broadcaster_id)
+
     obs.obs_properties_add_text(auth_props, "client_id", "Twitch Client ID", obs.OBS_TEXT_DEFAULT)
     obs.obs_properties_add_text(auth_props, "oauth_token", "Twitch OAuth Token", obs.OBS_TEXT_PASSWORD)
     obs.obs_properties_add_text(auth_props, "refresh_token", "Twitch Refresh Token", obs.OBS_TEXT_PASSWORD)
     obs.obs_properties_add_text(auth_props, "twitch_scopes", "Scopes", obs.OBS_TEXT_DEFAULT)
-    obs.obs_properties_add_button(auth_props, "generate_token", "Generar Token (Navegador)", on_generate_token)
-    obs.obs_properties_add_button(auth_props, "refresh_token_btn", "Refrescar Token", on_refresh_token)
-    obs.obs_properties_add_button(auth_props, "get_id_button", "Detectar ID y Canal", on_get_broadcaster_id)
     obs.obs_properties_add_group(props, "auth_group", "Configuración Twitch", obs.OBS_GROUP_NORMAL, auth_props)
 
     # Chat Group
@@ -98,6 +100,14 @@ def script_defaults(settings):
     obs.obs_data_set_default_string(settings, "oauth_token", "")
     obs.obs_data_set_default_string(settings, "refresh_token", "")
     obs.obs_data_set_default_string(settings, "twitch_scopes", "channel:manage:broadcast user:read:chat")
+
+def run_smart_auth_wrapper(properties, property):
+    """Ejecuta el script de autenticación inteligente en un proceso separado."""
+    script_path = os.path.join(os.path.dirname(__file__), "twitch_login.py")
+    scopes = obs.obs_data_get_string(_script_settings, "twitch_scopes") or "channel:manage:broadcast user:read:chat"
+    subprocess.Popen([sys.executable, script_path, "--smart", scopes])
+    obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] Iniciando proceso de autenticación inteligente de Twitch...")
+    return True
     obs.obs_data_set_default_string(settings, "broadcaster_id", "")
     obs.obs_data_set_default_string(settings, "chat_channel", "")
     
@@ -132,7 +142,9 @@ def script_update(settings):
 
 def on_refresh_token(properties, property):
     global oauth_token, refresh_token, client_id
+    obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] Iniciando refresco de token...")
     if not refresh_token:
+        obs.script_log(obs.LOG_WARNING, "[Twitch-Event-Actions] No hay refresh token configurado.")
         return True
     url = "https://twitchtokengenerator.com/api/refresh/{}".format(refresh_token.strip())
     try:
@@ -145,8 +157,11 @@ def on_refresh_token(properties, property):
             if _script_settings:
                 obs.obs_data_set_string(_script_settings, "oauth_token", oauth_token)
                 obs.obs_data_set_string(_script_settings, "refresh_token", refresh_token)
-    except:
-        pass
+            obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] Token refrescado con éxito.")
+        else:
+            obs.script_log(obs.LOG_ERROR, f"[Twitch-Event-Actions] Error al refrescar: {data.get('message', 'Desconocido')}")
+    except Exception as e:
+        obs.script_log(obs.LOG_ERROR, f"[Twitch-Event-Actions] Error de conexión al refrescar: {e}")
     return True
 
 def on_generate_token(properties, property):
@@ -320,5 +335,19 @@ def script_load(settings):
     script_update(settings)
 
 def script_unload():
+    try:
+        obs.timer_remove(_process_chat_queue)
+    except:
+        pass
     _irc_stop_event.set()
-    if _irc_socket: _irc_socket.close()
+    if _irc_socket:
+        try:
+            _irc_socket.shutdown(socket.SHUT_RDWR)
+        except:
+            pass
+        try:
+            _irc_socket.close()
+        except:
+            pass
+    if _irc_thread and _irc_thread.is_alive():
+        _irc_thread.join(timeout=1.0)

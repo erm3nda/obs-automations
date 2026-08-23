@@ -6,7 +6,7 @@
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     Write-Host "Solicitando permisos de Administrador para instalar todos los plugins..." -ForegroundColor Yellow
-    Start-Process powershell -ArgumentList "-NoExit -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
 
@@ -59,5 +59,6 @@ Write-Host "=========================================================" -Foregrou
 Write-Host "Directorio destino: $env:ProgramFiles\obs-studio\data\obs-plugins\frontend-tools\scripts\" -ForegroundColor DarkCyan
 Write-Host "En OBS Studio: Ve a Herramientas > Scripts y haz clic en Recargar / '+'" -ForegroundColor Cyan
 Write-Host ""
-Pause
+Write-Host "Cerrando automáticamente en 3 segundos..." -ForegroundColor DarkGray
+Start-Sleep -Seconds 3
 

@@ -57,18 +57,120 @@ def run_login():
         context.close()
     print("Paso de Login finalizado.")
 
-def run_generate():
+def run_smart_auth():
     profile_dir, tokens_file, _ = get_paths()
     print("=========================================================")
-    print("  PLAYWRIGHT TOKEN GENERATOR - obs-automations")
+    print("  PLAYWRIGHT TWITCH SMART AUTH - obs-automations")
     print("=========================================================")
-    
-    # Obtener los scopes pasados por parámetro (con fallback al valor por defecto)
-    scopes = "channel:manage:broadcast"
+
+    scopes = "channel:manage:broadcast%20user:read:chat"
     if len(sys.argv) > 2:
         raw_scopes = sys.argv[2].strip()
-        # Normalizar espacios y saltos de línea para el formato URL
         scopes = "%20".join([s.strip() for s in raw_scopes.split() if s.strip()])
+
+    chrome_path = os.environ.get("CHROME_PATH")
+    
+    # 1. Intentar primero de forma Headless para ver si ya hay sesión guardada
+    launch_args = {
+        "user_data_dir": profile_dir,
+        "headless": True,
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "ignore_default_args": ["--enable-automation"],
+        "args": ["--disable-blink-features=AutomationControlled"]
+    }
+    if chrome_path and os.path.exists(chrome_path):
+        launch_args["executable_path"] = chrome_path
+
+    client_id = "gp762nuuoqcoxypju8c569th9wz7q5"
+    auth_url = f"https://id.twitch.tv/oauth2/authorize?response_type=code&client_id={client_id}&redirect_uri=https://twitchtokengenerator.com&scope={scopes}"
+
+    print("Comprobando sesión guardada en Twitch...")
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(**launch_args)
+        page = context.new_page()
+        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        page.goto(auth_url)
+        page.wait_for_timeout(3000)
+
+        # Si redirige a login, la sesión no existe o caducó -> Abrir navegador visible para login
+        if "twitch.tv" in page.url and ("login" in page.url or "passport" in page.url):
+            context.close()
+            print("⚠ No hay sesión activa en Twitch. Abriendo navegador visible para inicio de sesión...")
+            print("Por favor, inicia sesión, resuelve el 2FA y CIERRA LA VENTANA cuando estés listo.")
+            
+            launch_args["headless"] = False
+            with sync_playwright() as p2:
+                context2 = p2.chromium.launch_persistent_context(**launch_args)
+                page2 = context2.new_page()
+                page2.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                page2.goto("https://twitch.tv/login")
+                while len(context2.pages) > 0:
+                    try:
+                        time.sleep(0.5)
+                    except KeyboardInterrupt:
+                        break
+                context2.close()
+
+            # Reintentar en modo headless tras el login manual
+            print("Reintentando generación automática de tokens con la nueva sesión...")
+            launch_args["headless"] = True
+            context = p.chromium.launch_persistent_context(**launch_args)
+            page = context.new_page()
+            page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            page.goto(auth_url)
+            page.wait_for_timeout(3000)
+
+        # Autorizar si aparece el botón de pasaporte
+        if "twitch.tv" in page.url:
+            try:
+                auth_button = page.locator('button:has-text("Autorizar"), button:has-text("Authorize"), [data-a-target="passport-authorize-button"]')
+                if auth_button.count() > 0:
+                    auth_button.click()
+                    print("✓ Botón de autorizar pulsado automáticamente.")
+            except Exception as e:
+                print(f"No se pudo autorizar automáticamente: {e}")
+
+        # Esperar redirección a twitchtokengenerator.com
+        print("Esperando redirección final a TwitchTokenGenerator...")
+        try:
+            page.wait_for_url("**/twitchtokengenerator.com**", timeout=30000)
+        except Exception:
+            print("❌ ERROR: Tiempo de espera agotado esperando la redirección.")
+            context.close()
+            sys.exit(1)
+
+        # Extraer tokens
+        print("Extrayendo tokens...")
+        try:
+            page.wait_for_selector('xpath=//*[contains(text(), "ACCESS TOKEN") or contains(text(), "Access Token")]/following::input[1]', timeout=10000)
+            access_token = page.locator('xpath=//*[contains(text(), "ACCESS TOKEN") or contains(text(), "Access Token")]/following::input[1]').input_value()
+            refresh_token = page.locator('xpath=//*[contains(text(), "REFRESH TOKEN") or contains(text(), "Refresh Token")]/following::input[1]').input_value()
+            client_id_extracted = page.locator('xpath=//*[contains(text(), "CLIENT ID") or contains(text(), "Client Id")]/following::input[1]').input_value()
+            
+            if access_token and refresh_token:
+                if os.path.exists(tokens_file):
+                    try:
+                        os.remove(tokens_file)
+                    except Exception:
+                        pass
+                data = {
+                    "twitch_oauth_token": access_token.strip(),
+                    "twitch_refresh_token": refresh_token.strip(),
+                    "twitch_client_id": client_id_extracted.strip() if client_id_extracted else client_id
+                }
+                with open(tokens_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4)
+                print("=========================================================")
+                print("✓ ¡TOKENS GENERADOS Y GUARDADOS CON ÉXITO!")
+                print("=========================================================")
+            else:
+                print("❌ ERROR: No se pudieron leer los valores de los tokens.")
+                sys.exit(1)
+        except Exception as e:
+            print(f"❌ ERROR al extraer los tokens: {e}")
+            sys.exit(1)
+        
+        context.close()
     
     # Eliminar archivo de tokens anterior si existe
     if os.path.exists(tokens_file):
@@ -166,18 +268,7 @@ def run_generate():
 
 if __name__ == "__main__":
     try:
-        if len(sys.argv) < 2:
-            print("Uso: python twitch_login.py [--login | --generate]")
-            sys.exit(1)
-            
-        mode = sys.argv[1]
-        if mode == "--login":
-            run_login()
-        elif mode == "--generate":
-            run_generate()
-        else:
-            print(f"Modo desconocido: {mode}")
-            sys.exit(1)
+        run_smart_auth()
             
     except Exception as e:
         # En caso de crash completo, escribir en crash.log para depuración

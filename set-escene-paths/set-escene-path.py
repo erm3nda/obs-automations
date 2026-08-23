@@ -25,6 +25,7 @@ except ImportError:
 enabled              = True
 base_folder          = ""      # debe configurarse en el plugin antes de funcionar
 base_filename_format = ""
+ignored_words        = ""
 keep_recording       = False
 auto_start_recording = False
 auto_start_replay    = False
@@ -87,9 +88,111 @@ def script_description():
         "<i>El stream nunca se toca.</i>"
     )
 
+def on_export_settings(props, prop):
+    desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+    export_path = os.path.join(desktop, "set-escene-path-settings.json")
+    
+    try:
+        config_data = {
+            "enabled": enabled,
+            "base_folder": base_folder,
+            "base_filename_format": base_filename_format,
+            "ignored_words": ignored_words,
+            "keep_recording": keep_recording,
+            "auto_start_recording": auto_start_recording,
+            "auto_start_replay": auto_start_replay,
+            "apply_vertical_paths": apply_vertical_paths,
+            "move_vertical_files": move_vertical_files,
+            "auto_start_vertical_recording": auto_start_vertical_recording,
+            "auto_start_vertical_backtrack": auto_start_vertical_backtrack,
+            "keep_vertical_recording": keep_vertical_recording,
+            "enable_cleanup": enable_cleanup,
+            "min_size_mb": min_size_mb,
+            "cleanup_threshold": cleanup_threshold,
+            "enable_vertical_cleanup": enable_vertical_cleanup,
+            "vertical_min_size_mb": vertical_min_size_mb,
+            "vertical_cleanup_threshold": vertical_cleanup_threshold
+        }
+        with open(export_path, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=4, ensure_ascii=False)
+        obs.script_log(obs.LOG_INFO, "Ajustes exportados a: {}".format(export_path))
+    except Exception as e:
+        obs.script_log(obs.LOG_WARNING, "Error al exportar ajustes: {}".format(e))
+    return True
+
+def on_import_settings(props, prop):
+    desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+    import_path = os.path.join(desktop, "set-escene-path-settings.json")
+    
+    if not os.path.exists(import_path):
+        obs.script_log(obs.LOG_WARNING, "No se encontró archivo en: {}".format(import_path))
+        return True
+        
+    try:
+        with open(import_path, "r", encoding="utf-8") as f:
+            config_data = json.load(f)
+        
+        # Guardar en perfil o simplemente actualizar variables globales y guardar si fuera necesario
+        # Como los ajustes de OBS se pasan a script_update, podemos recrear un objeto settings simulado o guardar vía obs si tuviera save, pero actualizamos directamente y recargamos
+        global enabled, base_folder, base_filename_format, ignored_words
+        global keep_recording, auto_start_recording, auto_start_replay
+        global apply_vertical_paths, move_vertical_files
+        global auto_start_vertical_recording, auto_start_vertical_backtrack, keep_vertical_recording
+        global enable_cleanup, min_size_mb, cleanup_threshold
+        global enable_vertical_cleanup, vertical_min_size_mb, vertical_cleanup_threshold
+
+        enabled = config_data.get("enabled", enabled)
+        base_folder = config_data.get("base_folder", base_folder)
+        base_filename_format = config_data.get("base_filename_format", base_filename_format)
+        ignored_words = config_data.get("ignored_words", ignored_words)
+        keep_recording = config_data.get("keep_recording", keep_recording)
+        auto_start_recording = config_data.get("auto_start_recording", auto_start_recording)
+        auto_start_replay = config_data.get("auto_start_replay", auto_start_replay)
+        apply_vertical_paths = config_data.get("apply_vertical_paths", apply_vertical_paths)
+        move_vertical_files = config_data.get("move_vertical_files", move_vertical_files)
+        auto_start_vertical_recording = config_data.get("auto_start_vertical_recording", auto_start_vertical_recording)
+        auto_start_vertical_backtrack = config_data.get("auto_start_vertical_backtrack", auto_start_vertical_backtrack)
+        keep_vertical_recording = config_data.get("keep_vertical_recording", keep_vertical_recording)
+        enable_cleanup = config_data.get("enable_cleanup", enable_cleanup)
+        min_size_mb = config_data.get("min_size_mb", min_size_mb)
+        cleanup_threshold = config_data.get("cleanup_threshold", cleanup_threshold)
+        enable_vertical_cleanup = config_data.get("enable_vertical_cleanup", enable_vertical_cleanup)
+        vertical_min_size_mb = config_data.get("vertical_min_size_mb", vertical_min_size_mb)
+        vertical_cleanup_threshold = config_data.get("vertical_cleanup_threshold", vertical_cleanup_threshold)
+
+        obs.script_log(obs.LOG_INFO, "Ajustes importados correctamente desde el archivo JSON.")
+    except Exception as e:
+        obs.script_log(obs.LOG_WARNING, "Error al importar ajustes: {}".format(e))
+    return True
+
 def script_properties():
     props = obs.obs_properties_create()
     obs.obs_properties_add_bool(props, "enabled", "✅ Plugin Activo")
+    
+    # Campo para ruta de gestión de ajustes
+    obs.obs_properties_add_path(
+        props, "settings_path", "Ruta archivo ajustes (.json)",
+        obs.OBS_PATH_FILE_SAVE, "JSON Files (*.json)",
+        os.path.join(os.path.expanduser("~"), "Desktop", "set-escene-path-settings.json")
+    )
+
+    # Crear un grupo para botones de gestión
+    btn_props = obs.obs_properties_create()
+    obs.obs_properties_add_button(btn_props, "export_btn", "📤 Exportar Ajustes", on_export_settings)
+    obs.obs_properties_add_button(btn_props, "import_btn", "📥 Importar Ajustes", on_import_settings)
+    obs.obs_properties_add_group(props, "settings_mng", "Gestión de ajustes", obs.OBS_GROUP_NORMAL, btn_props)
+
+    def on_preview_click(props, prop):
+        sc = obs.obs_frontend_get_current_scene()
+        if sc:
+            scene_name = obs.obs_source_get_name(sc)
+            obs.obs_source_release(sc)
+            folder_name = clean_name_for_folder(scene_name)
+            preview_str = os.path.join(base_folder if base_folder else "[Carpeta no definida]", folder_name)
+            obs.obs_property_set_description(prop, f"👁️ Vista previa: {preview_str.replace(os.sep, '/')}")
+        else:
+            obs.obs_property_set_description(prop, "👁️ Vista previa: [Sin escena activa]")
+        return True
 
     horizontal_props = obs.obs_properties_create()
     obs.obs_properties_add_path(
@@ -100,6 +203,14 @@ def script_properties():
         horizontal_props, "base_filename_format",
         "Formato de nombre",
         obs.OBS_TEXT_DEFAULT
+    )
+    obs.obs_properties_add_text(
+        horizontal_props, "ignored_words",
+        "Palabras a ignorar (separadas por coma)",
+        obs.OBS_TEXT_DEFAULT
+    )
+    obs.obs_properties_add_button(
+        horizontal_props, "preview_btn", "👁️ Actualizar Vista Previa de Ruta", on_preview_click
     )
     obs.obs_properties_add_bool(
         horizontal_props, "keep_recording",
@@ -176,6 +287,7 @@ def script_defaults(settings):
     obs.obs_data_set_default_bool(settings, "enabled", True)
     obs.obs_data_set_default_string(settings, "base_folder", "")
     obs.obs_data_set_default_string(settings, "base_filename_format", "")
+    obs.obs_data_set_default_string(settings, "ignored_words", "")
     obs.obs_data_set_default_bool(settings, "keep_recording",       False)
     obs.obs_data_set_default_bool(settings, "auto_start_recording", False)
     obs.obs_data_set_default_bool(settings, "auto_start_replay",    False)
@@ -199,10 +311,11 @@ def script_update(settings):
     global move_vertical_files
     global enable_cleanup, min_size_mb, cleanup_threshold
     global enable_vertical_cleanup, vertical_min_size_mb, vertical_cleanup_threshold
-    global _current_recording_folder, base_filename_format
+    global _current_recording_folder, base_filename_format, ignored_words
     enabled              = obs.obs_data_get_bool(settings, "enabled")
     val = obs.obs_data_get_string(settings, "base_folder")
     base_folder          = val if val else ""
+    ignored_words        = obs.obs_data_get_string(settings, "ignored_words")
     keep_recording       = obs.obs_data_get_bool(settings, "keep_recording")
     auto_start_recording = obs.obs_data_get_bool(settings, "auto_start_recording")
     auto_start_replay    = obs.obs_data_get_bool(settings, "auto_start_replay")
@@ -267,8 +380,13 @@ def clean_name_for_folder(name):
     name = re.sub(r'\s*\((tm|r|c)\)\s*', ' ', name, flags=re.IGNORECASE)
     name = re.sub(r'[<>:"/\\|?*]', ' ', name)
     name = re.sub(r'\s+', ' ', name).strip()
-    # Quitar sufijo " escene" (con o sin espacio, case-insensitive)
-    name = re.sub(r'\s*escene\s*$', '', name, flags=re.IGNORECASE).strip()
+    # Quitar palabras configuradas por el usuario
+    if ignored_words:
+        words = [w.strip() for w in ignored_words.split(',')]
+        for word in words:
+            if word:
+                pattern = r'\s*' + re.escape(word) + r'\s*$'
+                name = re.sub(pattern, '', name, flags=re.IGNORECASE).strip()
     return name if name else "unnamed"
 
 def clean_name_for_filename(name):

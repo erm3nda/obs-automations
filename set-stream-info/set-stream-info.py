@@ -107,11 +107,27 @@ def on_force_refresh_clicked(properties, property):
 def open_manual_token_generator(properties=None, property=None):
     """Abre la URL de autorización oficial de TwitchTokenGenerator en el navegador del sistema."""
     client_id = "gp762nuuoqcoxypju8c569th9wz7q5"
-    scopes = twitch_scopes if twitch_scopes and twitch_scopes.strip() else "channel:manage:broadcast"
+    scopes = twitch_scopes if twitch_scopes and twitch_scopes.strip() else "channel:manage:broadcast user:read:chat"
     scopes_url = "%20".join([s.strip() for s in scopes.split() if s.strip()])
     auth_url = f"https://id.twitch.tv/oauth2/authorize?response_type=code&client_id={client_id}&redirect_uri=https://twitchtokengenerator.com&scope={scopes_url}"
     obs.script_log(obs.LOG_INFO, f"[Set-Stream-Info] Abriendo generador de token en el navegador: {auth_url}")
     webbrowser.open(auth_url)
+    return True
+
+def run_smart_auth_wrapper(properties, property):
+    """Ejecuta el script de autenticación inteligente en un proceso separado."""
+    script_path = os.path.join(os.path.dirname(__file__), "twitch_login.py")
+    scopes = obs.obs_data_get_string(_script_settings, "twitch_scopes") or "channel:manage:broadcast user:read:chat"
+    subprocess.Popen([sys.executable, script_path, "--smart", scopes])
+    obs.script_log(obs.LOG_INFO, "[Set-Stream-Info] Iniciando proceso de autenticación inteligente de Twitch...")
+    return True
+
+def run_smart_auth_wrapper(properties, property):
+    """Ejecuta el script de autenticación inteligente en un proceso separado."""
+    script_path = os.path.join(os.path.dirname(__file__), "twitch_login.py")
+    scopes = obs.obs_data_get_string(_script_settings, "twitch_scopes") or "channel:manage:broadcast user:read:chat"
+    subprocess.Popen([sys.executable, script_path, "--smart", scopes])
+    obs.script_log(obs.LOG_INFO, "[Set-Stream-Info] Iniciando proceso de autenticación inteligente de Twitch...")
     return True
 
 def script_properties():
@@ -133,6 +149,44 @@ def script_properties():
         "Categoría de la escena",
         obs.OBS_COMBO_TYPE_EDITABLE, obs.OBS_COMBO_FORMAT_STRING
     )
+    
+    def on_refresh_categories(props, prop):
+        client_id = obs.obs_data_get_string(_script_settings, "twitch_client_id")
+        token = obs.obs_data_get_string(_script_settings, "twitch_oauth_token")
+        if not client_id or not token:
+            obs.script_log(obs.LOG_WARNING, "[Set-Stream-Info] Faltan credenciales.")
+            return True
+            
+        cat_prop = obs.obs_properties_get(scene_props, "current_scene_category")
+        current_cat = obs.obs_data_get_string(_script_settings, "current_scene_category")
+        
+        if not current_cat or len(current_cat) < 3:
+            obs.script_log(obs.LOG_WARNING, "[Set-Stream-Info] Escribe al menos 3 letras para buscar.")
+            return True
+
+        obs.script_log(obs.LOG_INFO, f"[Set-Stream-Info] Buscando categorías similares a: '{current_cat}'")
+        
+        headers = {"Client-ID": client_id, "Authorization": f"Bearer {token}"}
+        url = f"https://api.twitch.tv/helix/search/categories?query={urllib.parse.quote(current_cat)}"
+        req = urllib.request.Request(url, headers=headers)
+        
+        try:
+            with urllib.request.urlopen(req) as response:
+                res_data = json.loads(response.read().decode('utf-8'))
+                games = res_data.get("data", [])
+                
+                # Limpiar y repoblar la lista editable
+                obs.obs_property_list_clear(cat_prop)
+                for game in games:
+                    obs.obs_property_list_add_string(cat_prop, game.get("name"), game.get("name"))
+                
+                obs.script_log(obs.LOG_INFO, f"[Set-Stream-Info] Se encontraron {len(games)} categorías.")
+        except Exception as e:
+            obs.script_log(obs.LOG_ERROR, f"[Set-Stream-Info] Error buscando: {e}")
+        return True
+    
+    obs.obs_properties_add_button(scene_props, "refresh_cat_button", "🔍 Cargar/Refrescar categorías", on_refresh_categories)
+    
     if c_saved:
         obs.obs_property_list_add_string(p_cat, c_saved, c_saved)
 
@@ -164,11 +218,13 @@ def script_properties():
     obs.obs_properties_add_text(twitch_props, "twitch_client_id", "Twitch Client ID", obs.OBS_TEXT_DEFAULT)
     obs.obs_properties_add_text(twitch_props, "twitch_oauth_token", "Twitch Access Token", obs.OBS_TEXT_PASSWORD)
     obs.obs_properties_add_text(twitch_props, "twitch_refresh_token", "Twitch Refresh Token", obs.OBS_TEXT_PASSWORD)
-    obs.obs_properties_add_text(twitch_props, "twitch_scopes", "Scopes de Twitch", obs.OBS_TEXT_DEFAULT)
+    p_scopes = obs.obs_properties_add_text(twitch_props, "twitch_scopes", "Scopes de Twitch", obs.OBS_TEXT_DEFAULT)
+    obs.obs_property_set_modified_callback(p_scopes, lambda props, prop, settings: True)
     
+    obs.obs_properties_add_button(twitch_props, "smart_auth_button", "⚡ Autenticación Automática (Playwright)", run_smart_auth_wrapper)
+    obs.obs_properties_add_button(twitch_props, "manual_generate_button", "🌐 Abrir TwitchTokenGenerator.com (Manual)", open_manual_token_generator)
     obs.obs_properties_add_button(twitch_props, "refresh_token_button", "🔍 Comprobar Token", on_refresh_button_clicked)
     obs.obs_properties_add_button(twitch_props, "force_refresh_button", "🔄 Forzar Refresco de Token", on_force_refresh_clicked)
-    obs.obs_properties_add_button(twitch_props, "manual_generate_button", "🔑 Abrir Generador en Navegador", open_manual_token_generator)
 
     obs.obs_properties_add_group(
         props, "twitch_group", "🔐 Credenciales y Conexión Twitch",
@@ -188,7 +244,7 @@ def script_defaults(settings):
     obs.obs_data_set_default_string(settings, "twitch_oauth_token", "")
     obs.obs_data_set_default_string(settings, "twitch_refresh_token", "")
     obs.obs_data_set_default_string(settings, "broadcaster_id", "")
-    obs.obs_data_set_default_string(settings, "twitch_scopes", "channel:manage:broadcast")
+    obs.obs_data_set_default_string(settings, "twitch_scopes", "channel:manage:broadcast user:read:chat")
     obs.obs_data_set_default_int(settings,    "last_refresh_timestamp", 0)
 
 def run_proactive_refresh():
@@ -641,7 +697,14 @@ def script_load(settings):
     obs.script_log(obs.LOG_INFO, "Set-Stream-Info cargado correctamente.")
 
 def script_unload():
-    obs.timer_remove(execute_stream_info_update)
+    try:
+        obs.timer_remove(execute_stream_info_update)
+    except:
+        pass
+    try:
+        obs.timer_remove(run_proactive_refresh)
+    except:
+        pass
     obs.script_log(obs.LOG_INFO, "Set-Stream-Info descargado.")
 
 
