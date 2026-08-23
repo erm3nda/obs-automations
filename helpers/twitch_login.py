@@ -274,9 +274,9 @@ async def run_smart_auth():
 if __name__ == "__main__":
     try:
         if "--login" in sys.argv:
-            asyncio.get_event_loop().run_until_complete(run_login())
+            asyncio.run(run_login())
         else:
-            asyncio.get_event_loop().run_until_complete(run_smart_auth())
+            asyncio.run(run_smart_auth())
             
     except Exception as e:
         # En caso de crash completo, escribir en crash.log para depuración
