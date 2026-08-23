@@ -11,15 +11,13 @@ Unified OBS plugin to automate actions based on real-time Twitch events.
     - **Multiline Text**: Accumulates and formats chat messages in a single panel.
     - **Show/Hide**: Activates specific sources or scenes when chat events are received.
 
-> ⚠️ **Currently**, only **Chat Events** are implemented. The plugin is designed to support additional Twitch event types, which will be added in upcoming releases. These include:
-> - **Subscription Events**: New subscribers, resubscriptions, and subscription gifts.
-> - **Follow/Host Events**: New followers, channel hosting, and raids from other broadcasters.
-> - **Cheer Events**: Channel Points-style cheer alerts based on Bits usage.
-> - **Channel Points Custom Rewards**: Trigger actions from user-redeemed custom rewards.
-> - **Stream Lifecycle Events**: Go live, end stream, and title/category changes.
-> - **Guest Notification Events**: Moderator actions and other privileged user announcements.
-
-These additional event types are part of the Twitch Eventsub/Twitch IRC API and will be incorporated as future actions without requiring a rewrite of the existing event engine.
+  > ⚠️ Currently, only **Chat Events** are implemented. Other Twitch event types are planned for future releases:
+  > - Subscriptions
+  > - Follow/Host/ Raids
+  > - Cheer events
+  > - Channel Points custom rewards
+  > - Stream lifecycle (go live, end stream, title/category changes)
+  > - Guest/moderator notifications
 
 - **Direct Token Authorization**: Opens the official Twitch OAuth2 URL directly in your browser, with scopes pre-filled from your configuration. Approve and paste the token — no external tools or automation needed.
 - **Settings Management**: Allows full configuration import/export between OBS profiles.
