@@ -21,8 +21,11 @@ try {
     # Copiar script Python
     Copy-Item -Path (Join-Path $PSScriptRoot "twitch-stream-info.py") -Destination (Join-Path $obsScriptsDir "twitch-stream-info.py") -Force
     
-    # Copiar helpers
-    Copy-Item -Path (Join-Path $PSScriptRoot "..\helpers\twitch_login.py") -Destination (Join-Path $obsScriptsDir "twitch_login.py") -Force
+    # Copiar todos los helpers necesarios (incluyendo twitch_login.py, instaladores de deps, etc.)
+    $helpersDir = Join-Path $PSScriptRoot "..\helpers"
+    if (Test-Path $helpersDir) {
+        Get-ChildItem $helpersDir | Copy-Item -Destination $obsScriptsDir -Force
+    }
     
     # Copiar archivo twitch-stream-info.json si existe
     $jsonFile = Join-Path $PSScriptRoot "twitch-stream-info.json"

@@ -116,10 +116,21 @@ def open_manual_token_generator(properties=None, property=None):
     return True
 
 def run_smart_auth_wrapper(properties, property):
-    script_path = os.path.join(os.path.dirname(__file__), "twitch_login.py")
+    global _playwright_proc
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "twitch_login.py")
     scopes = obs.obs_data_get_string(_script_settings, "twitch_scopes") or "channel:manage:broadcast user:read:chat"
-    subprocess.Popen([sys.executable, script_path, "--smart", scopes])
-    obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Iniciando proceso de autenticación inteligente de Twitch...")
+    visible = obs.obs_data_get_bool(_script_settings, "playwright_visible")
+    
+    creationflags = 0
+    if not visible:
+        creationflags = 0x08000000 # CREATE_NO_WINDOW
+        
+    args = ["python", script_path, "--smart", scopes]
+    if visible:
+        args.append("--visible")
+        
+    _playwright_proc = subprocess.Popen(args, creationflags=creationflags)
+    obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Lanzando proceso externo: {' '.join(args)}")
     return True
 
 def script_properties():
@@ -217,6 +228,8 @@ def script_properties():
     p_scopes = obs.obs_properties_add_text(twitch_props, "twitch_scopes", "Scopes de Twitch", obs.OBS_TEXT_DEFAULT)
     obs.obs_property_set_modified_callback(p_scopes, lambda props, prop, settings: True)
     
+    obs.obs_properties_add_bool(twitch_props, "playwright_visible", "👀 Navegador Visible (No Headless)")
+    obs.obs_properties_add_button(twitch_props, "check_deps", "🔍 Verificar/Instalar Dependencias", on_check_dependencies)
     obs.obs_properties_add_button(twitch_props, "smart_auth_button", "⚡ Autenticación Automática (Playwright)", run_smart_auth_wrapper)
     obs.obs_properties_add_button(twitch_props, "manual_generate_button", "🌐 Abrir TwitchTokenGenerator.com (Manual)", open_manual_token_generator)
     obs.obs_properties_add_button(twitch_props, "refresh_token_button", "🔍 Comprobar Token", on_refresh_button_clicked)

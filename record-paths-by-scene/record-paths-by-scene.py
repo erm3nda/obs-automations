@@ -262,7 +262,7 @@ def script_properties():
     )
     obs.obs_properties_add_bool(
         horizontal_props, "enable_cleanup",
-        "Limpiar archivos"
+        "Limpiar archivos (opencv)"
     )
     obs.obs_properties_add_int(
         horizontal_props, "min_size_mb",
@@ -303,8 +303,8 @@ def script_properties():
             vertical_props, "move_vertical_files", "Mover ficheros automáticamente"
         )
         obs.obs_properties_add_bool(
-            vertical_props, "enable_vertical_cleanup", "Limpiar archivos"
-        )
+            vertical_props, "enable_vertical_cleanup", "Limpiar archivos (opencv)"
+            )
         obs.obs_properties_add_int(
             vertical_props, "vertical_min_size_mb", "Tamaño mínimo (MB)", 0, 500, 1
         )

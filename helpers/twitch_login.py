@@ -69,11 +69,12 @@ def run_smart_auth():
         scopes = "%20".join([s.strip() for s in raw_scopes.split() if s.strip()])
 
     chrome_path = os.environ.get("CHROME_PATH")
+    is_visible = "--visible" in sys.argv
     
     # 1. Intentar primero de forma Headless para ver si ya hay sesión guardada
     launch_args = {
         "user_data_dir": profile_dir,
-        "headless": True,
+        "headless": not is_visible,
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "ignore_default_args": ["--enable-automation"],
         "args": ["--disable-blink-features=AutomationControlled"]
