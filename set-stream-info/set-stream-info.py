@@ -187,7 +187,7 @@ def script_properties():
         "Coletilla global",
         obs.OBS_TEXT_DEFAULT
     )
-    obs.obs_properties_add_bool(scene_props, "block_if_streaming", "🚫 NO cambiar info mientras esté emitiendo (Solo Offline)")
+    obs.obs_properties_add_bool(scene_props, "block_if_streaming", "🚫 NO cambiar info automáticamente mientras emitas (Permite cambios manuales)")
 
     list_mode = obs.obs_properties_add_list(
         scene_props, "update_mode", "Modo de actualización",
