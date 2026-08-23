@@ -4,10 +4,10 @@ OBS Studio script that automatically sets the **recording** and **replay buffer*
 
 ## Features
 
-- Folder name derived from the active scene name (strips invalid characters and trailing `escene` suffix)
-- **Auto-start** recording and/or replay buffer on scene switch
-- **Keep recording** mode — updates path silently without interrupting active recordings
-- Stream is never touched
+- Folder name derived from the active scene name (strips invalid characters and trailing `escene` suffix).
+- **Auto-start** recording and/or replay buffer on scene switch.
+- **Keep recording** mode — updates path silently without interrupting active recordings.
+- Stream is never touched.
 
 ## Installation
 
@@ -31,3 +31,6 @@ Then in OBS: **Tools → Scripts → [+] → record-paths-by-scene.py**
 Name your scenes after the game. The script strips `™ ® ©`, Windows-invalid characters, and a trailing `escene` suffix.
 
 Example: `BFV escene` → folder `BFV`
+
+---
+*Disclaimer: This project was primarily developed using Gemini Flash (Google AI Studio) and, to a lesser extent, Kilo free models.*

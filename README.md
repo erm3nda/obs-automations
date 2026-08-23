@@ -1,17 +1,17 @@
 # OBS Automations
 
-Colección de scripts y plugins en Python para **OBS Studio** organizados por módulos independientes:
+Collection of Python scripts and plugins for **OBS Studio** organized into independent modules:
 
-## Plugins incluidos
+## Included Plugins
 
-1. **`record-paths-by-scene`**: Cambia automáticamente la ruta de salida de grabación y Replay Buffer según la escena activa (con limpieza de carpetas vacías y soporte para nombramiento limpio).
-2. **`twitch-stream-info`**: Permite configurar y actualizar automáticamente el título, la categoría y las credenciales de la transmisión en Twitch por escena, con selector de iconos y guardado/carga de ajustes.
-3. **`twitch-event-actions`**: Motor unificado para eventos de Twitch en OBS, con soporte para acciones basadas en chat (Texto y Texto multilineal) y autenticación automatizada.
+1. **`record-paths-by-scene`**: Automatically changes the recording and Replay Buffer output path based on the active scene (includes automatic empty folder cleanup and support for clean naming).
+2. **`twitch-stream-info`**: Configure and automatically update the stream title, category, and credentials in Twitch per scene, featuring an icon selector and settings import/export.
+3. **`twitch-event-actions`**: Unified engine for Twitch events in OBS, supporting chat actions (Text and Multiline Text) and automated authentication.
 
-## Instalación
+## Installation
 
-Cada plugin cuenta con su propio script de instalación en PowerShell (`install.ps1`), o puedes utilizar los scripts globales de la raíz (`install-all.bat` o `install-all.ps1`).  
-Revisa la documentación específica dentro de cada carpeta para más información sobre requisitos y configuración.
+Each plugin has its own PowerShell installation script (`install.ps1`), or you can use the global scripts in the root directory (`install-all.bat` or `install-all.ps1`).
+Check the specific documentation within each folder for further information regarding requirements and configuration.
 
 ---
 *Disclaimer: This project was primarily developed using Gemini Flash (Google AI Studio) and, to a lesser extent, Kilo free models.*

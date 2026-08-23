@@ -1,26 +1,29 @@
 # Twitch Event Actions
 
-Plugin unificado de OBS para automatizar acciones basadas en eventos en tiempo real de Twitch.
+Unified OBS plugin to automate actions based on real-time Twitch events.
 
-## Características
+## Features
 
-- **Motor de eventos**: Basado en un listener de IRC conectado a tu canal de Twitch.
-- **Acciones configurables**:
-  - **Chat**: Reacciona a mensajes de chat mediante:
-    - **Texto**: Muestra el mensaje en una fuente de texto de OBS.
-    - **Texto multilinea**: Acumula y formatea mensajes de chat en un panel único.
-    - **Mostrar/Ocultar**: Activa fuentes o escenas específicas al recibir eventos.
-- **Autenticación simplificada**: Soporte para autenticación inteligente mediante Playwright o generación manual de tokens.
-- **Gestión de ajustes**: Permite importar y exportar configuraciones completas entre perfiles de OBS.
+- **Event Engine**: Powered by an IRC listener connected to your Twitch channel.
+- **Configurable Actions**:
+  - **Chat**: React to chat messages via:
+    - **Text**: Displays the message in an OBS text source.
+    - **Multiline Text**: Accumulates and formats chat messages in a single panel.
+    - **Show/Hide**: Activates specific sources or scenes when events are received.
+- **Simplified Authentication**: Supports smart authentication via Playwright or manual token generation.
+- **Settings Management**: Allows full configuration import/export between OBS profiles.
 
-## Instalación
+## Installation
 
-Ejecuta `install.ps1` como Administrador o usa `install-all.bat` desde la raíz del repositorio.
+Run `install.ps1` as Administrator or use `install-all.bat` from the root directory.
 
-Luego, en OBS: **Herramientas → Scripts → [+] → twitch-event-actions.py**.
+Then, in OBS: **Tools → Scripts → [+] → twitch-event-actions.py**.
 
-## Configuración inicial
+## Initial Configuration
 
-1. Asegúrate de configurar tus credenciales de Twitch en la pestaña de configuración (se recomienda usar el botón "Detectar ID y Canal" tras haber autenticado).
-2. Selecciona la fuente de destino para las acciones (Chat, Suscripciones, etc.) en los paneles correspondientes.
-3. Puedes realizar pruebas de funcionalidad utilizando el botón "Probar Acción Chat".
+1. Ensure your Twitch credentials are set in the configuration tab (using the "Detect ID and Channel" button after authenticating is recommended).
+2. Select the target source for actions (Chat, Subscriptions, etc.) in the respective panels.
+3. Use the "▶ Test Chat Action" button to verify functionality.
+
+---
+*Disclaimer: This project was primarily developed using Gemini Flash (Google AI Studio) and, to a lesser extent, Kilo free models.*

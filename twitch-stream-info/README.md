@@ -1,23 +1,26 @@
 # Twitch Stream Info
 
-Plugin de OBS Studio para gestionar la información de la transmisión en Twitch de forma individual por escena.
+OBS Studio plugin to manage stream information on Twitch, customizable per scene.
 
-## Características
+## Features
 
-- Actualización automática de **título**, **categoría** y etiquetas según la escena activa.
-- **Guardado/Carga de ajustes**: Permite exportar e importar la configuración de escenas entre equipos o perfiles.
-- **Selector de iconos**: Añade iconos rápidamente a los títulos de tus directos.
-- **Modos de actualización**: Configuración flexible (Manual, inmediato o retardado).
-- Integración con la API de Twitch (Helix) para autenticación y refresco de tokens.
+- Automatic update of **title**, **category**, and tags based on the active scene.
+- **Settings Import/Export**: Export and import scene configurations between different setups or profiles.
+- **Icon Selector**: Quickly add icons to your stream titles.
+- **Update Modes**: Flexible configuration (Manual, Immediate, or Delayed).
+- Integration with the Twitch API (Helix) for authentication and token refreshing.
 
-## Instalación
+## Installation
 
-Ejecuta `install.ps1` como Administrador para copiar el script a la carpeta de scripts de OBS Studio. Luego, en OBS: **Herramientas → Scripts → [+] → twitch-stream-info.py**.
+Run `install.ps1` as Administrator to copy the script to the OBS Studio scripts folder. Then, in OBS: **Tools → Scripts → [+] → twitch-stream-info.py**.
 
-## Configuración
+## Configuration
 
-Desde el panel del script en OBS, puedes configurar:
-- Credenciales de Twitch (Client ID, Access Token, Refresh Token).
-- Modos de actualización de la información.
-- Mapeo de título y categoría para cada escena.
-- Coletilla global para los títulos.
+From the script panel in OBS, you can configure:
+- Twitch credentials (Client ID, Access Token, Refresh Token).
+- Information update modes.
+- Title and category mapping for each scene.
+- Global suffix for titles.
+
+---
+*Disclaimer: This project was primarily developed using Gemini Flash (Google AI Studio) and, to a lesser extent, Kilo free models.*
