@@ -54,6 +54,8 @@ SCENE_ALIASES = {
     'rf2': 'rFactor 2(rFactor2.exe)',
 }
 
+_script_settings = None
+
 # Intencion capturada en el momento del cambio de escena
 _want_restart_recording = False
 _want_restart_replay    = False
@@ -89,8 +91,10 @@ def script_description():
     )
 
 def on_export_settings(props, prop):
-    desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-    export_path = os.path.join(desktop, "set-escene-path-settings.json")
+    settings_dir = obs.obs_data_get_string(_script_settings, "settings_path")
+    if not settings_dir:
+        settings_dir = os.path.join(os.path.expanduser("~"), "Desktop")
+    export_path = os.path.join(settings_dir, "set-escene-path-settings.json")
     
     try:
         config_data = {
@@ -121,8 +125,10 @@ def on_export_settings(props, prop):
     return True
 
 def on_import_settings(props, prop):
-    desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-    import_path = os.path.join(desktop, "set-escene-path-settings.json")
+    settings_dir = obs.obs_data_get_string(_script_settings, "settings_path")
+    if not settings_dir:
+        settings_dir = os.path.join(os.path.expanduser("~"), "Desktop")
+    import_path = os.path.join(settings_dir, "set-escene-path-settings.json")
     
     if not os.path.exists(import_path):
         obs.script_log(obs.LOG_WARNING, "No se encontró archivo en: {}".format(import_path))
@@ -132,35 +138,36 @@ def on_import_settings(props, prop):
         with open(import_path, "r", encoding="utf-8") as f:
             config_data = json.load(f)
         
-        # Guardar en perfil o simplemente actualizar variables globales y guardar si fuera necesario
-        # Como los ajustes de OBS se pasan a script_update, podemos recrear un objeto settings simulado o guardar vía obs si tuviera save, pero actualizamos directamente y recargamos
-        global enabled, base_folder, base_filename_format, ignored_words
-        global keep_recording, auto_start_recording, auto_start_replay
-        global apply_vertical_paths, move_vertical_files
-        global auto_start_vertical_recording, auto_start_vertical_backtrack, keep_vertical_recording
-        global enable_cleanup, min_size_mb, cleanup_threshold
-        global enable_vertical_cleanup, vertical_min_size_mb, vertical_cleanup_threshold
+        target_settings = _script_settings if _script_settings else obs.obs_data_create()
+        
+        obs.obs_data_set_bool(target_settings, "enabled", config_data.get("enabled", True))
+        obs.obs_data_set_string(target_settings, "base_folder", config_data.get("base_folder", ""))
+        obs.obs_data_set_string(target_settings, "base_filename_format", config_data.get("base_filename_format", ""))
+        obs.obs_data_set_string(target_settings, "ignored_words", config_data.get("ignored_words", ""))
+        obs.obs_data_set_bool(target_settings, "keep_recording", config_data.get("keep_recording", False))
+        obs.obs_data_set_bool(target_settings, "auto_start_recording", config_data.get("auto_start_recording", False))
+        obs.obs_data_set_bool(target_settings, "auto_start_replay", config_data.get("auto_start_replay", False))
+        obs.obs_data_set_bool(target_settings, "apply_vertical_paths", config_data.get("apply_vertical_paths", True))
+        obs.obs_data_set_bool(target_settings, "move_vertical_files", config_data.get("move_vertical_files", False))
+        obs.obs_data_set_bool(target_settings, "auto_start_vertical_recording", config_data.get("auto_start_vertical_recording", False))
+        obs.obs_data_set_bool(target_settings, "auto_start_vertical_backtrack", config_data.get("auto_start_vertical_backtrack", False))
+        obs.obs_data_set_bool(target_settings, "keep_vertical_recording", config_data.get("keep_vertical_recording", False))
+        obs.obs_data_set_bool(target_settings, "enable_cleanup", config_data.get("enable_cleanup", False))
+        obs.obs_data_set_int(target_settings, "min_size_mb", config_data.get("min_size_mb", 25))
+        obs.obs_data_set_int(target_settings, "cleanup_threshold", config_data.get("cleanup_threshold", 90))
+        obs.obs_data_set_bool(target_settings, "enable_vertical_cleanup", config_data.get("enable_vertical_cleanup", False))
+        obs.obs_data_set_int(target_settings, "vertical_min_size_mb", config_data.get("vertical_min_size_mb", 25))
+        obs.obs_data_set_int(target_settings, "vertical_cleanup_threshold", config_data.get("vertical_cleanup_threshold", 90))
+        
+        script_update(target_settings)
+        
+        if props:
+            obs.obs_properties_apply_settings(props, target_settings)
+        
+        if not _script_settings:
+            obs.obs_data_release(target_settings)
 
-        enabled = config_data.get("enabled", enabled)
-        base_folder = config_data.get("base_folder", base_folder)
-        base_filename_format = config_data.get("base_filename_format", base_filename_format)
-        ignored_words = config_data.get("ignored_words", ignored_words)
-        keep_recording = config_data.get("keep_recording", keep_recording)
-        auto_start_recording = config_data.get("auto_start_recording", auto_start_recording)
-        auto_start_replay = config_data.get("auto_start_replay", auto_start_replay)
-        apply_vertical_paths = config_data.get("apply_vertical_paths", apply_vertical_paths)
-        move_vertical_files = config_data.get("move_vertical_files", move_vertical_files)
-        auto_start_vertical_recording = config_data.get("auto_start_vertical_recording", auto_start_vertical_recording)
-        auto_start_vertical_backtrack = config_data.get("auto_start_vertical_backtrack", auto_start_vertical_backtrack)
-        keep_vertical_recording = config_data.get("keep_vertical_recording", keep_vertical_recording)
-        enable_cleanup = config_data.get("enable_cleanup", enable_cleanup)
-        min_size_mb = config_data.get("min_size_mb", min_size_mb)
-        cleanup_threshold = config_data.get("cleanup_threshold", cleanup_threshold)
-        enable_vertical_cleanup = config_data.get("enable_vertical_cleanup", enable_vertical_cleanup)
-        vertical_min_size_mb = config_data.get("vertical_min_size_mb", vertical_min_size_mb)
-        vertical_cleanup_threshold = config_data.get("vertical_cleanup_threshold", vertical_cleanup_threshold)
-
-        obs.script_log(obs.LOG_INFO, "Ajustes importados correctamente desde el archivo JSON.")
+        obs.script_log(obs.LOG_INFO, "Ajustes importados y aplicados correctamente desde el archivo JSON.")
     except Exception as e:
         obs.script_log(obs.LOG_WARNING, "Error al importar ajustes: {}".format(e))
     return True
@@ -169,19 +176,6 @@ def script_properties():
     props = obs.obs_properties_create()
     obs.obs_properties_add_bool(props, "enabled", "✅ Plugin Activo")
     
-    # Campo para ruta de gestión de ajustes
-    obs.obs_properties_add_path(
-        props, "settings_path", "Ruta archivo ajustes (.json)",
-        obs.OBS_PATH_FILE_SAVE, "JSON Files (*.json)",
-        os.path.join(os.path.expanduser("~"), "Desktop", "set-escene-path-settings.json")
-    )
-
-    # Crear un grupo para botones de gestión
-    btn_props = obs.obs_properties_create()
-    obs.obs_properties_add_button(btn_props, "export_btn", "📤 Exportar Ajustes", on_export_settings)
-    obs.obs_properties_add_button(btn_props, "import_btn", "📥 Importar Ajustes", on_import_settings)
-    obs.obs_properties_add_group(props, "settings_mng", "Gestión de ajustes", obs.OBS_GROUP_NORMAL, btn_props)
-
     def on_preview_click(props, prop):
         sc = obs.obs_frontend_get_current_scene()
         if sc:
@@ -280,8 +274,23 @@ def script_properties():
             props, "vertical_settings", "Ajustes de Aitum Vertical",
             obs.OBS_GROUP_NORMAL, vertical_props
         )
-
-    return props
+    
+        # Crear un grupo para gestión de archivos de configuración (AL FINAL)
+        mng_props = obs.obs_properties_create()
+        
+        obs.obs_properties_add_path(
+            mng_props, "settings_path", "Carpeta donde guardar ajustes",
+            obs.OBS_PATH_DIRECTORY, "",
+            os.path.join(os.path.expanduser("~"), "Desktop")
+        )
+        
+        obs.obs_properties_add_button(mng_props, "export_btn", "💾 Guardar Ajustes", on_export_settings)
+        obs.obs_properties_add_button(mng_props, "import_btn", "📂 Cargar Ajustes", on_import_settings)
+        
+        # Usar OBS_GROUP_NORMAL ya que OBS_GROUP_COLLAPSIBLE no está disponible
+        obs.obs_properties_add_group(props, "settings_mng", "Gestión de ajustes", obs.OBS_GROUP_NORMAL, mng_props)
+    
+        return props
 
 def script_defaults(settings):
     obs.obs_data_set_default_bool(settings, "enabled", True)
@@ -304,6 +313,8 @@ def script_defaults(settings):
     obs.obs_data_set_default_int(settings,  "vertical_cleanup_threshold", 90)
 
 def script_update(settings):
+    global _script_settings
+    _script_settings = settings
     global enabled, base_folder, keep_recording, auto_start_recording, auto_start_replay
     global apply_vertical_paths
     global auto_start_vertical_recording, auto_start_vertical_backtrack
@@ -1135,7 +1146,8 @@ def on_event(event):
 # ─── Ciclo de vida del script ─────────────────────────────────────────────────
 
 def script_load(settings):
-    global _current_recording_folder, _vertical_event_listener_thread
+    global _script_settings, _current_recording_folder, _vertical_event_listener_thread
+    _script_settings = settings
     obs.obs_frontend_add_event_callback(on_event)
     if _vertical_event_listener_thread and _vertical_event_listener_thread.is_alive():
         return
