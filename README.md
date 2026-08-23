@@ -1,8 +1,8 @@
 # OBS Automations
 
-Collection of Python scripts and plugins for **OBS Studio** organized into independent modules:
+Collection of Python scripts for **OBS Studio** organized into independent modules:
 
-## Included Plugins
+## Included Scripts
 
 1. **`record-paths-by-scene`**: Automatically changes the recording and Replay Buffer output path based on the active scene (supports horizontal/landscape and Aitum Vertical, includes automatic empty folder cleanup and support for clean naming). [Read more](record-paths-by-scene/README.md)
 2. **`twitch-stream-info`**: Configure and automatically update the stream title, category, and credentials in Twitch per scene, featuring an icon selector and settings import/export. [Read more](twitch-stream-info/README.md)
@@ -10,7 +10,7 @@ Collection of Python scripts and plugins for **OBS Studio** organized into indep
 
 ## How it works
 
-These plugins are designed to work together with OBS Studio's automatic scene switching capabilities (e.g., scene switching based on the active executable/game). When a scene switch occurs, the plugins automatically update the relevant recording paths and stream information based on your pre-configured settings.
+These scripts are designed to work together with OBS Studio's automatic scene switching capabilities (e.g., scene switching based on the active executable/game). When a scene switch occurs, the scripts automatically update the relevant recording paths and stream information based on your pre-configured settings.
 
 ## Installation
 
