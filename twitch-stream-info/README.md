@@ -8,13 +8,13 @@ OBS Studio plugin to manage stream information on Twitch, customizable per scene
 - **Settings Import/Export**: Export and import scene configurations between different setups or profiles.
 - **Icon Selector**: Quickly add icons to your stream titles.
 - **Update Modes**: Flexible configuration (Manual, Immediate, or Delayed).
-- Integration with the Twitch API (Helix) for authentication and token refreshing.
+- Direct token authorization: opens the official Twitch OAuth2 URL in your browser with scopes pre-filled — approve and paste the token. Automatic token refreshing via the Helix API.
 
 ## Installation
 
 Run `install.ps1` as Administrator to copy the script to the OBS Studio scripts folder. Then, in OBS: **Tools → Scripts → [+] → twitch-stream-info.py**.
 
-**Note:** This plugin includes optional automation features (like smart authentication) that may require external Python dependencies such as Playwright.
+**Note:** No external Python dependencies are required. Token authorization opens directly in your system browser with scopes pre-filled in the URL.
 
 ## Configuration
 
