@@ -608,7 +608,7 @@ def on_export_settings(props, prop):
     settings_dir = obs.obs_data_get_string(_script_settings, "settings_path")
     if not settings_dir:
         settings_dir = os.path.join(os.path.expanduser("~"), "Desktop")
-    export_path = os.path.join(settings_dir, "set-stream-info-settings.json")
+    export_path = os.path.join(settings_dir, "set-stream-info.json")
     
     try:
         scene_map = obs.obs_data_get_obj(_script_settings, "scene_map")
@@ -641,7 +641,7 @@ def on_import_settings(props, prop):
     settings_dir = obs.obs_data_get_string(_script_settings, "settings_path")
     if not settings_dir:
         settings_dir = os.path.join(os.path.expanduser("~"), "Desktop")
-    import_path = os.path.join(settings_dir, "set-stream-info-settings.json")
+    import_path = os.path.join(settings_dir, "set-stream-info.json")
     
     if not os.path.exists(import_path):
         obs.script_log(obs.LOG_WARNING, f"[Set-Stream-Info] No se encontró el archivo de ajustes en: {import_path}")
