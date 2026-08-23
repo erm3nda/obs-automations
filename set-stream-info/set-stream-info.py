@@ -200,17 +200,6 @@ def script_properties():
     obs.obs_properties_add_int(scene_props, "delay_seconds", "Segundos de retardo", 5, 3600, 5)
     obs.obs_properties_add_button(scene_props, "apply_button", "Aplicar y guardar escena activa", on_apply_clicked)
     
-    # Bloque de Gestión de Ajustes (Configuración global)
-    mng_props = obs.obs_properties_create()
-    obs.obs_properties_add_path(
-        mng_props, "settings_path", "Carpeta donde guardar ajustes",
-        obs.OBS_PATH_DIRECTORY, "",
-        os.path.join(os.path.expanduser("~"), "Desktop")
-    )
-    obs.obs_properties_add_button(mng_props, "export_btn", "💾 Guardar Ajustes", on_export_settings)
-    obs.obs_properties_add_button(mng_props, "import_btn", "📂 Cargar Ajustes", on_import_settings)
-    obs.obs_properties_add_group(props, "settings_mng", "Gestión de ajustes", obs.OBS_GROUP_NORMAL, mng_props)
-    
     obs.obs_properties_add_group(
         props, "scene_group", "📺 Configuración de Escenas y Directo",
         obs.OBS_GROUP_NORMAL, scene_props
@@ -233,6 +222,17 @@ def script_properties():
         props, "twitch_group", "🔐 Credenciales y Conexión Twitch",
         obs.OBS_GROUP_NORMAL, twitch_props
     )
+
+    # Bloque de Gestión de Ajustes (Configuración global) al final del todo
+    mng_props = obs.obs_properties_create()
+    obs.obs_properties_add_path(
+        mng_props, "settings_path", "Carpeta donde guardar ajustes",
+        obs.OBS_PATH_DIRECTORY, "",
+        os.path.join(os.path.expanduser("~"), "Desktop")
+    )
+    obs.obs_properties_add_button(mng_props, "export_btn", "💾 Guardar Ajustes", on_export_settings)
+    obs.obs_properties_add_button(mng_props, "import_btn", "📂 Cargar Ajustes", on_import_settings)
+    obs.obs_properties_add_group(props, "settings_mng", "Gestión de ajustes", obs.OBS_GROUP_NORMAL, mng_props)
 
     return props
 
