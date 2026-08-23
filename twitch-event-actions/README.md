@@ -6,10 +6,10 @@ Unified OBS plugin to automate actions based on real-time Twitch events.
 
 - **Event Engine**: Powered by an IRC listener connected to your Twitch channel.
 - **Configurable Actions**:
-  - **Chat**: React to chat messages via:
+  - **Chat Events**: Trigger OBS actions from incoming Twitch chat messages:
     - **Text**: Displays the message in an OBS text source.
     - **Multiline Text**: Accumulates and formats chat messages in a single panel.
-    - **Show/Hide**: Activates specific sources or scenes when events are received.
+    - **Show/Hide**: Activates specific sources or scenes when chat events are received.
 - **Direct Token Authorization**: Opens the official Twitch OAuth2 URL directly in your browser, with scopes pre-filled from your configuration. Approve and paste the token — no external tools or automation needed.
 - **Settings Management**: Allows full configuration import/export between OBS profiles.
 
