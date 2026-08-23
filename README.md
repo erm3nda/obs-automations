@@ -12,3 +12,6 @@ Colección de scripts y plugins en Python para **OBS Studio** organizados por m�
 
 Cada plugin cuenta con su propio script de instalación en PowerShell (`install.ps1`), o puedes utilizar los scripts globales de la raíz (`install-all.bat` o `install-all.ps1`).  
 Revisa la documentación específica dentro de cada carpeta para más información sobre requisitos y configuración.
+
+---
+*Disclaimer: Este proyecto ha sido desarrollado principalmente con Gemini Flash (Google AI Studio) y, en menor medida, con modelos de Kilo.*
