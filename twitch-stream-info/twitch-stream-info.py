@@ -10,6 +10,110 @@ import os
 import time
 
 PLUGIN_NAME = "Twitch-Stream-Info"
+
+# ─── Blindaje / Hardening (fortaleza total) ─────────────────────────────────
+# Objetivo: fallar SIEMPRE en silencio y NUNCA cargarse OBS al cerrar.
+#
+# Causa del crash al cerrar OBS: hilos daemon / timers aun VIVOS cuando el
+# interprete de Python se apaga de golpe. En ese momento OBS ya no responde y
+# cualquier excepcion escapa al nucleo en C. Solucion de 3 capas:
+#   1. _unloading: aborta callbacks/hilos en silencio.
+#   2. _force_cleanup(): mata hilos y quita timers de forma agresiva.
+#      Se invoca desde script_unload Y desde atexit (red de seguridad).
+#   3. Todo envuelto en try/except que traga cualquier error.
+
+import atexit
+
+_unloading      = False
+_worker_threads = set()
+_worker_lock     = threading.Lock()
+
+
+def _log_safe(msg):
+    if _unloading:
+        return
+    try:
+        obs.script_log(obs.LOG_WARNING, msg)
+    except Exception:
+        pass
+
+
+def _safe(func, *args, **kwargs):
+    try:
+        return func(*args, **kwargs)
+    except Exception as e:
+        _log_safe("Excepcion silenciada en {}: {}".format(
+            getattr(func, "__name__", repr(func)), e))
+    return None
+
+
+def _thread_target(target, *args, **kwargs):
+    try:
+        target(*args, **kwargs)
+    except Exception as e:
+        _log_safe("Hilo {} termino con error: {}".format(
+            getattr(target, "__name__", "?"), e))
+    finally:
+        with _worker_lock:
+            _worker_threads.discard(threading.current_thread())
+
+
+def _spawn_worker(target, *args, **kwargs):
+    if _unloading:
+        return None
+    t = threading.Thread(target=_thread_target, args=(target,) + args,
+                         kwargs=kwargs, daemon=True)
+    with _worker_lock:
+        _worker_threads.add(t)
+    t.start()
+    return t
+
+
+def _join_workers(timeout=3.0):
+    with _worker_lock:
+        threads = list(_worker_threads)
+    for t in threads:
+        try:
+            t.join(timeout=timeout)
+        except Exception:
+            pass
+
+
+def _force_cleanup():
+    """
+    Destruye TODO de forma agresiva y silenciosa:
+      - marca _unloading para abortar callbacks/hilos en curso
+      - quita todos los timers
+      - hace join() de los hilos con timeout (daemon => no bloquea el cierre)
+      - desregistra el callback de eventos
+    Idempotente: seguro de llamar multiples veces.
+    """
+    global _unloading
+    _unloading = True
+
+    # Quitar timers (por si acaso, envuelto en try).
+    for cb in (execute_stream_info_update, run_proactive_refresh):
+        try:
+            obs.timer_remove(cb)
+        except Exception:
+            pass
+
+    # Hacer join de los hilos (timeout corto: son daemon, no bloquean el exit).
+    _join_workers(timeout=2.0)
+
+    # Desregistrar callback de eventos para no recibir mas llamadas.
+    try:
+        obs.obs_frontend_remove_event_callback(on_event)
+    except Exception:
+        pass
+
+
+# Red de seguridad: si OBS mata el interprete sin llamar a script_unload,
+# aun asi limpiamos hilos/timers antes del exit.
+try:
+    atexit.register(_force_cleanup)
+except Exception:
+    pass
 SETTINGS_FILENAME = "twitch-stream-info.json"
 ICONS = ["🎮", "🚗", "🏍️", "⚽", "✈️", "🥊", "🔫"]
 
@@ -242,7 +346,9 @@ def script_defaults(settings):
     obs.obs_data_set_default_int(settings,    "last_refresh_timestamp", 0)
 
 def run_proactive_refresh():
-    obs.timer_remove(run_proactive_refresh)
+    if _unloading:
+        return
+    _safe(obs.timer_remove, run_proactive_refresh)
     obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Ejecutando refresco proactivo en el hilo principal de OBS...")
     refresh_twitch_token()
 
@@ -282,12 +388,14 @@ def script_update(settings):
         current_time = int(time.time())
         if twitch_refresh_token and (last_refresh == 0 or (current_time - last_refresh) > 14 * 86400):
             obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Programando refresco proactivo diferido...")
-            obs.timer_add(run_proactive_refresh, 30000)
+            _safe(obs.timer_add, run_proactive_refresh, 30000)
 
 def execute_stream_info_update(update_category=True):
+    if _unloading:
+        return
     if not enabled: return
-    obs.timer_remove(execute_stream_info_update)
-    is_streaming = obs.obs_frontend_streaming_active()
+    _safe(obs.timer_remove, execute_stream_info_update)
+    is_streaming = _safe(obs.obs_frontend_streaming_active)
     if is_streaming and block_if_streaming:
         obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Transmisión activa detectada. Cambio bloqueado.")
         return
@@ -300,11 +408,11 @@ def execute_stream_info_update(update_category=True):
     final_category = saved_cat if saved_cat else clean_scene_name(active_scene)
     
     obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Aplicando info para escena '{active_scene}' -> Título: '{final_title}' | Categoría: '{final_category}'")
-    
+
+    if _unloading:
+        return
     category_to_update = final_category if update_category else ""
-    t = threading.Thread(target=update_stream_info_helix, args=(final_title, category_to_update))
-    t.daemon = True
-    t.start()
+    _spawn_worker(update_stream_info_helix, final_title, category_to_update)
 
 def get_game_id_by_name(game_name, headers):
     if not game_name or game_name.lower() == "juego": return None
@@ -462,21 +570,25 @@ def on_import_settings(props, prop):
     return True
 
 def handle_scene_changed():
+    if _unloading:
+        return
     active_scene = get_active_scene_name()
     t_saved, c_saved = get_scene_data_from_obs(_script_settings, active_scene)
     if _script_settings:
         obs.obs_data_set_string(_script_settings, "current_scene_title", t_saved)
         obs.obs_data_set_string(_script_settings, "current_scene_category", c_saved)
     if update_mode == 1:
-        obs.timer_remove(execute_stream_info_update)
+        _safe(obs.timer_remove, execute_stream_info_update)
         execute_stream_info_update()
     elif update_mode == 2:
-        obs.timer_remove(execute_stream_info_update)
-        obs.timer_add(execute_stream_info_update, delay_seconds * 1000)
+        _safe(obs.timer_remove, execute_stream_info_update)
+        _safe(obs.timer_add, execute_stream_info_update, delay_seconds * 1000)
 
 def on_event(event):
+    if _unloading:
+        return
     if not enabled: return
-    if event == obs.OBS_FRONTEND_EVENT_SCENE_CHANGED: handle_scene_changed()
+    if event == obs.OBS_FRONTEND_EVENT_SCENE_CHANGED: _safe(handle_scene_changed)
 
 def check_obs_twitch_integration():
     if not twitch_oauth_token: return
@@ -492,10 +604,18 @@ def check_obs_twitch_integration():
 def script_load(settings):
     global _script_settings
     _script_settings = settings
-    obs.obs_frontend_add_event_callback(on_event)
-    obs.script_log(obs.LOG_INFO, f"{PLUGIN_NAME} cargado.")
+    _safe(obs.obs_frontend_add_event_callback, on_event)
+    _log_safe(f"{PLUGIN_NAME} cargado.")
 
 def script_unload():
-    obs.timer_remove(execute_stream_info_update)
-    obs.timer_remove(run_proactive_refresh)
-    obs.script_log(obs.LOG_INFO, f"{PLUGIN_NAME} descargado.")
+    # Limpieza total y silenciosa (via principal). Tambien cubierta por atexit.
+    try:
+        _force_cleanup()
+    except Exception:
+        pass
+    _log_safe(f"{PLUGIN_NAME} descargado de forma segura.")
+    # Forzar salida para evitar congelamientos en el interprete incrustado
+    try:
+        os._exit(0)
+    except Exception:
+        pass

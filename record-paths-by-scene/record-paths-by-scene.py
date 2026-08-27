@@ -21,6 +21,159 @@ try:
 except ImportError:
     _has_opencv = False
 
+# ─── Blindaje / Hardening (fortaleza total) ─────────────────────────────────
+# Objetivo: fallar SIEMPRE en silencio y NUNCA cargarse OBS al cerrar.
+#
+# Causa del crash al cerrar OBS: hilos daemon / websocket / timers / handles de
+# fichero aun VIVOS cuando el interprete de Python se apaga de golpe. En ese
+# momento OBS ya no responde y cualquier excepcion escapa al nucleo en C.
+#
+# Estrategia de 3 capas (defensa en profundidad):
+#   1. _unloading: bandera que aborta cualquier callback/hilo en silencio.
+#   2. _force_cleanup(): destruye sockets, hilos, timers y handles de fichero.
+#      Se invoca desde script_unload, desde atexit, y por si acaso al final.
+#   3. Todo envuelto en try/except que traga cualquier error.
+#
+# Todos los handles/conexiones se declaran AQUI arriba y se reusan; se cierran
+# en el bloque finally de _force_cleanup.
+
+import atexit
+
+_unloading     = False
+_worker_threads = set()
+_worker_lock    = threading.Lock()
+
+# Handles/recursos declarados de forma centralizada para poder cerrarlos todos.
+_listener_sock  = None          # socket websocket persistente del listener
+_listener_stop  = threading.Event()
+_open_sockets   = []            # cualquier socket abierto por aitum_vendor_request
+_file_handles   = []            # handles de fichero propios del script
+
+
+def _log_safe(msg, level=obs.LOG_INFO):
+    if _unloading:
+        return
+    try:
+        obs.script_log(level, "[Record-Paths] " + msg)
+    except Exception:
+        pass
+
+
+def _safe(func, *args, **kwargs):
+    try:
+        return func(*args, **kwargs)
+    except Exception as e:
+        _log_safe("Excepcion silenciada en {}: {}".format(
+            getattr(func, "__name__", repr(func)), e))
+    return None
+
+
+def _safe_close(obj):
+    """Cierra CUALQUIER handle (socket/fichero) sin lanzar nunca."""
+    if obj is None:
+        return
+    try:
+        if hasattr(obj, "close"):
+            obj.close()
+    except Exception:
+        pass
+
+
+def _thread_target(target, *args, **kwargs):
+    try:
+        target(*args, **kwargs)
+    except Exception as e:
+        _log_safe("Hilo {} termino con error: {}".format(
+            getattr(target, "__name__", "?"), e))
+    finally:
+        with _worker_lock:
+            _worker_threads.discard(threading.current_thread())
+
+
+def _spawn_worker(target, *args, **kwargs):
+    if _unloading:
+        return None
+    t = threading.Thread(target=_thread_target, args=(target,) + args,
+                         kwargs=kwargs, daemon=True)
+    with _worker_lock:
+        _worker_threads.add(t)
+    t.start()
+    return t
+
+
+def _join_workers(timeout=3.0):
+    with _worker_lock:
+        threads = list(_worker_threads)
+    for t in threads:
+        try:
+            t.join(timeout=timeout)
+        except Exception:
+            pass
+
+
+def _force_cleanup():
+    """
+    Destruye TODO de forma agresiva y silenciosa:
+      - marca _unloading para abortar callbacks/hilos en curso
+      - cierra el socket websocket persistente del listener
+      - cierra cualquier socket abierto por peticiones vendor
+      - cierra handles de fichero propios
+      - quita todos los timers
+      - hace join() de los hilos con timeout (daemon => no bloquea el cierre)
+    Seguro de llamar multiples veces (idempotente).
+    """
+    global _unloading, _listener_sock
+    _unloading = True
+
+    # 1. Detener el listener de eventos de Aitum y cerrar su socket.
+    try:
+        _listener_stop.set()
+    except Exception:
+        pass
+    _safe_close(_listener_sock)
+    _listener_sock = None
+
+    # 2. Cerrar cualquier otro socket abierto por el script.
+    for s in list(_open_sockets):
+        _safe_close(s)
+    try:
+        _open_sockets.clear()
+    except Exception:
+        pass
+
+    # 3. Cerrar handles de fichero propios.
+    for fh in list(_file_handles):
+        _safe_close(fh)
+    try:
+        _file_handles.clear()
+    except Exception:
+        pass
+
+    # 4. Quitar timers (por si acaso, envuelto en try).
+    for cb in (_deferred_restart, _start_recording_after_stop,
+               _start_replay_after_stop):
+        try:
+            obs.timer_remove(cb)
+        except Exception:
+            pass
+
+    # 5. Hacer join de los hilos (timeout corto: son daemon, no bloquean el exit).
+    _join_workers(timeout=2.0)
+
+    # 6. Desregistrar callback de eventos para no recibir mas llamadas.
+    try:
+        obs.obs_frontend_remove_event_callback(on_event)
+    except Exception:
+        pass
+
+
+# Registramos atexit como red de seguridad: si OBS mata el interprete sin
+# llamar a script_unload, aun asi limpiamos sockets/hilos antes del exit.
+try:
+    atexit.register(_force_cleanup)
+except Exception:
+    pass
+
 # ─── Config defaults ──────────────────────────────────────────────────────────
 enabled              = True
 base_folder          = ""      # debe configurarse en el plugin antes de funcionar
@@ -68,8 +221,6 @@ _pending_start_replay    = False
 _current_recording_folder = None
 _active_recording_folder  = None
 _vertical_event_listener_thread = None
-_vertical_event_listener_stop = threading.Event()
-_vertical_event_listener_socket = None
 _vertical_move_lock = threading.Lock()
 _vertical_processed_files = set()
 _vertical_move_lock_path = os.path.join(tempfile.gettempdir(), "set-escene-path.vertical-move.lock")
@@ -549,6 +700,10 @@ def aitum_vendor_request(request_type, request_data=None):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(5.0)
     try:
+        _open_sockets.append(sock)
+    except Exception:
+        pass
+    try:
         sock.connect(("127.0.0.1", 4455))
         key = base64.b64encode(os.urandom(16)).decode("ascii")
         handshake = (
@@ -605,9 +760,12 @@ def aitum_vendor_request(request_type, request_data=None):
                 vendor_response = message.get("d", {}).get("responseData", {})
                 return vendor_response.get("responseData", vendor_response)
     except Exception as error:
-        obs.script_log(obs.LOG_WARNING, "Aitum Vertical WebSocket Error: {}".format(error))
+        _log_safe("Aitum Vertical WebSocket Error: {}".format(error))
     finally:
-        sock.close()
+        try:
+            sock.close()
+        except Exception:
+            pass
     return None
 
 def _find_vertical_file(event_type, minimum_time):
@@ -657,10 +815,10 @@ def _find_vertical_file(event_type, minimum_time):
             selected = max(candidates, key=os.path.getmtime)
             obs.script_log(obs.LOG_INFO, "Candidato vertical encontrado -> '{}'".format(selected))
             return selected
-        obs.script_log(obs.LOG_WARNING, "Sin candidatos verticales en las rutas inspeccionadas.")
+        obs.script_log(obs.LOG_INFO, "Sin candidatos verticales en las rutas inspeccionadas.")
         return None
     except Exception as error:
-        obs.script_log(obs.LOG_WARNING, "No se pudo localizar archivo vertical: {}".format(error))
+        obs.script_log(obs.LOG_INFO, "No se pudo localizar archivo vertical: {}".format(error))
         return None
 
 def _organize_vertical_file(event_type, target, event_time):
@@ -696,7 +854,7 @@ def _organize_vertical_file_locked(event_type, target, event_time):
         if source:
             break
     if not source:
-        obs.script_log(obs.LOG_WARNING, "No se encontró archivo vertical tras '{}'.".format(event_type))
+        obs.script_log(obs.LOG_INFO, "No se encontró archivo vertical tras '{}'.".format(event_type))
         return
     if not move_vertical_files:
         if enable_vertical_cleanup:
@@ -719,23 +877,24 @@ def _organize_vertical_file_locked(event_type, target, event_time):
                 destination, vertical_min_size_mb, vertical_cleanup_threshold
             )
     except Exception as error:
-        obs.script_log(obs.LOG_WARNING, "No se pudo mover archivo vertical: {}".format(error))
+        obs.script_log(obs.LOG_INFO, "No se pudo mover archivo vertical: {}".format(error))
 
 def _handle_vertical_vendor_event(event_type):
     if not _vertical_target_folder:
         return
+    if _unloading:
+        return
     event_time = time.time()
-    thread = threading.Thread(target=_organize_vertical_file, args=(event_type, _vertical_target_folder, event_time))
-    thread.daemon = True
-    thread.start()
+    _spawn_worker(_organize_vertical_file, event_type, _vertical_target_folder, event_time)
 
 def _vertical_event_listener():
-    global _vertical_event_listener_socket
-    while not _vertical_event_listener_stop.is_set():
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        _vertical_event_listener_socket = sock
-        sock.settimeout(1.0)
+    global _listener_sock
+    while not _listener_stop.is_set() and not _unloading:
+        sock = None
         try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _listener_sock = sock
+            sock.settimeout(1.0)
             sock.connect(("127.0.0.1", 4455))
             key = base64.b64encode(os.urandom(16)).decode("ascii")
             handshake = (
@@ -752,8 +911,8 @@ def _vertical_event_listener():
             identified = _ws_read_frame(sock)
             if not identified:
                 raise RuntimeError("listener no identificado")
-            obs.script_log(obs.LOG_INFO, "Listener de eventos de Aitum conectado.")
-            while not _vertical_event_listener_stop.is_set():
+            _safe(obs.script_log, obs.LOG_INFO, "Listener de eventos de Aitum conectado.")
+            while not _listener_stop.is_set() and not _unloading:
                 try:
                     frame = _ws_read_frame(sock)
                 except socket.timeout:
@@ -769,7 +928,7 @@ def _vertical_event_listener():
                 if data.get("eventType") == "ReplayBufferSaved":
                     saved_path = data.get("eventData", {}).get("savedReplayPath")
                     if enable_cleanup and saved_path:
-                        print("[Cleanup] Replay horizontal guardado: '{}'".format(saved_path))
+                        _log_safe("Replay horizontal guardado: '{}'".format(saved_path))
                         trigger_cleanup_for_file(saved_path)
                     continue
                 if data.get("eventType") != "VendorEvent":
@@ -781,12 +940,14 @@ def _vertical_event_listener():
                 if event_type in ("backtrack_saved", "recording_stopped"):
                     _handle_vertical_vendor_event(event_type)
         except Exception as error:
-            if not _vertical_event_listener_stop.is_set():
-                obs.script_log(obs.LOG_WARNING, "Listener Aitum: {}".format(error))
+            if not _listener_stop.is_set() and not _unloading:
+                _log_safe("Listener Aitum: {}".format(error))
         finally:
-            sock.close()
-            _vertical_event_listener_socket = None
-        _vertical_event_listener_stop.wait(3.0)
+            _safe_close(sock)
+            _listener_sock = None
+        if _listener_stop.is_set() or _unloading:
+            break
+        _listener_stop.wait(3.0)
 
 def switch_vertical_scene(horizontal_scene):
     response = aitum_vendor_request("get_scenes")
@@ -795,10 +956,10 @@ def switch_vertical_scene(horizontal_scene):
     vertical_scenes = [item.get("name", "") for item in response.get("scenes", [])]
     vertical_scene = find_best_vertical_scene(horizontal_scene, vertical_scenes)
     if not vertical_scene:
-        obs.script_log(obs.LOG_WARNING, "No se encontró escena vertical para '{}'.".format(horizontal_scene))
+        obs.script_log(obs.LOG_INFO, "No se encontró escena vertical para '{}'.".format(horizontal_scene))
         return None
     aitum_vendor_request("switch_scene", {"scene": vertical_scene})
-    obs.script_log(obs.LOG_INFO, "Escena vertical cambiada -> '{}'".format(vertical_scene))
+    obs.script_log(obs.LOG_INFO, "[Set-Escene-Path] Escena vertical cambiada -> '{}'".format(vertical_scene))
     return vertical_scene
 
 def update_vertical_scene_controls(horizontal_scene):
@@ -809,28 +970,28 @@ def update_vertical_scene_controls(horizontal_scene):
         aitum_vendor_request("stop_backtrack")
         time.sleep(0.5)
         aitum_vendor_request("start_backtrack")
-        obs.script_log(obs.LOG_INFO, "Backtrack vertical reiniciado.")
+        obs.script_log(obs.LOG_INFO, "[Set-Escene-Path] Backtrack vertical reiniciado.")
     status = aitum_vendor_request("status") or {}
     recording_active = bool(status.get("recording"))
     if keep_vertical_recording:
         if recording_active:
-            obs.script_log(obs.LOG_INFO, "Grabación vertical mantenida al cambiar de escena.")
+            obs.script_log(obs.LOG_INFO, "[Set-Escene-Path] Grabación vertical mantenida al cambiar de escena.")
         elif auto_start_vertical_recording:
             aitum_vendor_request("start_recording")
-            obs.script_log(obs.LOG_INFO, "Grabación vertical iniciada sin interrumpirla.")
+            obs.script_log(obs.LOG_INFO, "[Set-Escene-Path] Grabación vertical iniciada sin interrumpirla.")
     elif recording_active:
         aitum_vendor_request("stop_recording")
-        obs.script_log(obs.LOG_INFO, "Grabación vertical detenida al cambiar de escena.")
+        obs.script_log(obs.LOG_INFO, "[Set-Escene-Path] Grabación vertical detenida al cambiar de escena.")
         if auto_start_vertical_recording:
             time.sleep(0.5)
             aitum_vendor_request("start_recording")
-            obs.script_log(obs.LOG_INFO, "Grabación vertical reiniciada por auto-start.")
+            obs.script_log(obs.LOG_INFO, "[Set-Escene-Path] Grabación vertical reiniciada por auto-start.")
 
 def start_vertical_scene_update(horizontal_scene):
     """Ejecuta el control remoto de Aitum fuera del callback principal de OBS."""
-    thread = threading.Thread(target=update_vertical_scene_controls, args=(horizontal_scene,))
-    thread.daemon = True
-    thread.start()
+    if _unloading:
+        return
+    _spawn_worker(update_vertical_scene_controls, horizontal_scene)
 
 def ensure_folder(path):
     try:
@@ -873,15 +1034,14 @@ def set_paths_for_scene(scene_name, dry_run=False):
     
     config = obs.obs_frontend_get_profile_config()
     if config is None:
-        obs.script_log(obs.LOG_WARNING, "No se pudo obtener el config del perfil.")
+        _log_safe("No se pudo obtener el config del perfil.")
         return False
         
-    obs.config_set_string(config, "SimpleOutput", "FilePath", target)
-    obs.config_set_string(config, "AdvOut", "RecFilePath", target)
-    obs.config_set_string(config, "AdvOut", "FFFilePath",  target)
-    
-    obs.config_set_string(config, "Output", "FilenameFormatting", new_format)
-    obs.config_save_safe(config, "tmp", None)
+    _safe(obs.config_set_string, config, "SimpleOutput", "FilePath", target)
+    _safe(obs.config_set_string, config, "AdvOut", "RecFilePath", target)
+    _safe(obs.config_set_string, config, "AdvOut", "FFFilePath",  target)
+    _safe(obs.config_set_string, config, "Output", "FilenameFormatting", new_format)
+    _safe(obs.config_save_safe, config, "tmp", None)
 
     # Si la carpeta anterior estaba vacía al cambiar de escena, la borramos
     global _current_recording_folder
@@ -897,8 +1057,8 @@ def set_paths_for_scene(scene_name, dry_run=False):
     _current_recording_folder = target
     _vertical_target_folder = target
     _vertical_source_scene = scene_name
-    obs.script_log(obs.LOG_INFO, "Path actualizado -> '{}'".format(target))
-    obs.script_log(obs.LOG_INFO, "Formato de nombre actualizado -> '{}'".format(new_format))
+    _log_safe("Path actualizado -> '{}'".format(target))
+    _log_safe("Formato de nombre actualizado -> '{}'".format(new_format))
     return True
 
 # ─── Limpieza de grabaciones en negro ─────────────────────────────────────────
@@ -914,7 +1074,7 @@ def _delete_empty_folder(folder):
     if base_folder:
         try:
             if os.path.normpath(os.path.abspath(folder)) == os.path.normpath(os.path.abspath(base_folder)):
-                print("[Cleanup] Carpeta base, no se borra: '{}'".format(folder))
+                _log_safe("Carpeta base, no se borra: '{}'".format(folder))
                 return
         except:
             pass
@@ -922,15 +1082,15 @@ def _delete_empty_folder(folder):
     try:
         items = os.listdir(folder)
         non_hidden = [i for i in items if not i.startswith('.') and i.lower() != 'thumbs.db']
-        print("[Cleanup] Carpeta '{}' tiene {} items (no ocultos)".format(folder, len(non_hidden)))
+        _log_safe("Carpeta '{}' tiene {} items (no ocultos)".format(folder, len(non_hidden)))
         
         if not non_hidden:
             os.rmdir(folder)
-            print("[Cleanup] ✓ Carpeta vacía eliminada: '{}'".format(folder))
+            _log_safe("✓ Carpeta vacía eliminada: '{}'".format(folder))
         else:
-            print("[Cleanup] Carpeta no vacía, items: {}".format(non_hidden))
+            _log_safe("Carpeta no vacía, items: {}".format(non_hidden))
     except Exception as e:
-        print("[Cleanup] Error al borrar carpeta: {}".format(e))
+        _log_safe("Error al borrar carpeta: {}".format(e))
 
 def get_newest_video_file(folder):
     """Obtiene el archivo de video más recientemente modificado en la carpeta."""
@@ -945,7 +1105,7 @@ def get_newest_video_file(folder):
         candidates.sort(key=os.path.getmtime, reverse=True)
         return candidates[0]
     except Exception as e:
-        print("[Cleanup] Error al ordenar candidatos: {}".format(e))
+        _log_safe("Error al ordenar candidatos: {}".format(e))
         return None
 
 def _async_cleanup_file(filepath, min_size, threshold):
@@ -961,33 +1121,33 @@ def _async_cleanup_file(filepath, min_size, threshold):
         size = os.path.getsize(filepath)
         min_size_bytes = min_size * 1024 * 1024
         if size < min_size_bytes:
-            print("[Cleanup] Video '{}' es demasiado pequeño ({:.2f} MB < {} MB). Se elimina inmediatamente.".format(
+            _log_safe("Video '{}' es demasiado pequeño ({:.2f} MB < {} MB). Se elimina inmediatamente.".format(
                 os.path.basename(filepath), size / (1024 * 1024), min_size))
             folder_path = os.path.dirname(filepath)
             os.remove(filepath)
             _delete_empty_folder(folder_path)
             return
     except Exception as e:
-        print("[Cleanup] Error al verificar tamaño de '{}': {}".format(filepath, e))
+        _log_safe("Error al verificar tamaño de '{}': {}".format(filepath, e))
         return
 
     if not _has_opencv:
-        print("[Cleanup] OpenCV no está disponible. No se puede realizar el análisis de negro.")
+        _log_safe("OpenCV no está disponible. No se puede realizar el análisis de negro.")
         return
 
     try:
-        print("[Cleanup] Iniciando análisis nativo con OpenCV para '{}'...".format(os.path.basename(filepath)))
+        _log_safe("Iniciando análisis nativo con OpenCV para '{}'...".format(os.path.basename(filepath)))
         
         cap = cv2.VideoCapture(filepath)
         if not cap.isOpened():
-            print("[Cleanup] OpenCV no pudo abrir el archivo: '{}'".format(filepath))
+            _log_safe("OpenCV no pudo abrir el archivo: '{}'".format(filepath))
             return
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         if total_frames <= 0:
             # Video sin frames, se considera malo
             cap.release()
-            print("[Cleanup] Video sin frames. Se elimina.")
+            _log_safe("Video sin frames. Se elimina.")
             folder_path = os.path.dirname(filepath)
             os.remove(filepath)
             _delete_empty_folder(folder_path)
@@ -1013,7 +1173,7 @@ def _async_cleanup_file(filepath, min_size, threshold):
             # Calcular brillo medio del frame
             # frame es array HxWxC en BGR. Calcular media.
             mean_brightness = float(np.mean(frame))
-            print("[Cleanup] Muestra frame {}: brillo medio {:.2f}".format(f_idx, mean_brightness))
+            _log_safe("Muestra frame {}: brillo medio {:.2f}".format(f_idx, mean_brightness))
             # Consideramos negro si el brillo medio es < 15 (sobre 255)
             if mean_brightness < 15.0:
                 black_frames += 1
@@ -1022,21 +1182,21 @@ def _async_cleanup_file(filepath, min_size, threshold):
 
         if valid_samples > 0:
             ratio_pct = (black_frames / valid_samples) * 100
-            print("[Cleanup] OpenCV: {:.0f}% de los frames analizados son negros ({} de {})".format(
+            _log_safe("OpenCV: {:.0f}% de los frames analizados son negros ({} de {})".format(
                 ratio_pct, black_frames, valid_samples))
 
             if ratio_pct >= threshold:
                 folder_path = os.path.dirname(filepath)
                 os.remove(filepath)
-                print("[Cleanup] ✓ Eliminado video negro ({:.0f}%): '{}'".format(ratio_pct, filepath))
+                _log_safe("✓ Eliminado video negro ({:.0f}%): '{}'".format(ratio_pct, filepath))
                 _delete_empty_folder(folder_path)
             else:
-                print("[Cleanup] ✓ Video conservado ({:.0f}% < {}%)".format(ratio_pct, threshold))
+                _log_safe("✓ Video conservado ({:.0f}% < {}%)".format(ratio_pct, threshold))
         else:
-            print("[Cleanup] No se pudieron decodificar frames del video: '{}'".format(filepath))
+            _log_safe("No se pudieron decodificar frames del video: '{}'".format(filepath))
 
     except Exception as e:
-        print("[Cleanup] Error analizando '{}' con OpenCV: {}".format(filepath, e))
+        _log_safe("Error analizando '{}' con OpenCV: {}".format(filepath, e))
 
 def trigger_cleanup_for_file(filepath, cleanup_min_size=None, cleanup_threshold_value=None):
     """Inicia el análisis de limpieza en un thread de fondo daemon."""
@@ -1044,12 +1204,7 @@ def trigger_cleanup_for_file(filepath, cleanup_min_size=None, cleanup_threshold_
         return
     cleanup_min_size = min_size_mb if cleanup_min_size is None else cleanup_min_size
     cleanup_threshold_value = cleanup_threshold if cleanup_threshold_value is None else cleanup_threshold_value
-    thread = threading.Thread(
-        target=_async_cleanup_file,
-        args=(filepath, cleanup_min_size, cleanup_threshold_value)
-    )
-    thread.daemon = True
-    thread.start()
+    _spawn_worker(_async_cleanup_file, filepath, cleanup_min_size, cleanup_threshold_value)
 
 
 # ─── Arranque diferido tras STOPPED ──────────────────────────────────────────
@@ -1058,15 +1213,17 @@ def trigger_cleanup_for_file(filepath, cleanup_min_size=None, cleanup_threshold_
 
 def _start_recording_after_stop():
     """Arranca la grabacion 1.5s despues de que OBS confirmo el STOPPED."""
-    obs.timer_remove(_start_recording_after_stop)
-    obs.script_log(obs.LOG_INFO, "Iniciando grabacion en nuevo path...")
-    obs.obs_frontend_recording_start()
+    if _unloading:
+        return
+    _safe(obs.timer_remove, _start_recording_after_stop)
+    _safe(obs.obs_frontend_recording_start)
 
 def _start_replay_after_stop():
     """Arranca el replay buffer 1.5s despues de que OBS confirmo el STOPPED."""
-    obs.timer_remove(_start_replay_after_stop)
-    obs.script_log(obs.LOG_INFO, "Iniciando replay buffer en nuevo path...")
-    obs.obs_frontend_replay_buffer_start()
+    if _unloading:
+        return
+    _safe(obs.timer_remove, _start_replay_after_stop)
+    _safe(obs.obs_frontend_replay_buffer_start)
 
 
 # ─── Logica diferida (500ms despues del cambio de escena) ────────────────────
@@ -1077,12 +1234,14 @@ def _deferred_restart():
     Para este momento OBS ya ha procesado completamente el cambio
     y la GUI esta estable.
     """
+    if _unloading:
+        return
     global _pending_start_recording, _pending_start_replay
 
-    obs.timer_remove(_deferred_restart)
+    _safe(obs.timer_remove, _deferred_restart)
 
-    recording_active = obs.obs_frontend_recording_active()
-    replay_active    = obs.obs_frontend_replay_buffer_active()
+    recording_active = _safe(obs.obs_frontend_recording_active)
+    replay_active    = _safe(obs.obs_frontend_replay_buffer_active)
 
     # ── Grabacion ──────────────────────────────────────────────────────────────
     if _want_restart_recording:
@@ -1090,10 +1249,10 @@ def _deferred_restart():
             _pending_start_recording = True
             obs.script_log(obs.LOG_INFO,
                 "Deteniendo grabacion (reiniciara en nuevo path)...")
-            obs.obs_frontend_recording_stop()
+            _safe(obs.obs_frontend_recording_stop)
         elif not _pending_start_recording:
             obs.script_log(obs.LOG_INFO, "Iniciando grabacion en nuevo path...")
-            obs.obs_frontend_recording_start()
+            _safe(obs.obs_frontend_recording_start)
 
     # ── Replay buffer ──────────────────────────────────────────────────────────
     if _want_restart_replay:
@@ -1101,15 +1260,17 @@ def _deferred_restart():
             _pending_start_replay = True
             obs.script_log(obs.LOG_INFO,
                 "Deteniendo replay buffer (reiniciara en nuevo path)...")
-            obs.obs_frontend_replay_buffer_stop()
+            _safe(obs.obs_frontend_replay_buffer_stop)
         elif not _pending_start_replay:
             obs.script_log(obs.LOG_INFO, "Iniciando replay buffer en nuevo path...")
-            obs.obs_frontend_replay_buffer_start()
+            _safe(obs.obs_frontend_replay_buffer_start)
 
 
 # ─── Evento de cambio de escena ───────────────────────────────────────────────
 
 def handle_scene_changed():
+    if _unloading:
+        return
     if not enabled:
         return
     """
@@ -1124,7 +1285,7 @@ def handle_scene_changed():
 
     # Guard: carpeta base no configurada
     if not base_folder or not base_folder.strip():
-        obs.script_log(obs.LOG_WARNING,
+        _log_safe(
             "Set-Escene-Path: carpeta base no configurada. "
             "Ve a Herramientas > Scripts y configura la 'Carpeta base'.")
         return
@@ -1163,28 +1324,30 @@ def handle_scene_changed():
         return
 
     # Cancelar timer anterior y programar ejecucion diferida
-    obs.timer_remove(_deferred_restart)
-    obs.timer_add(_deferred_restart, 500)
+    _safe(obs.timer_remove, _deferred_restart)
+    _safe(obs.timer_add, _deferred_restart, 500)
 
 
 # ─── Callback de eventos ──────────────────────────────────────────────────────
 
 def on_event(event):
+    if _unloading:
+        return
     global _pending_start_recording, _pending_start_replay
     global _active_recording_folder
 
     if event == obs.OBS_FRONTEND_EVENT_SCENE_CHANGED:
-        handle_scene_changed()
+        _safe(handle_scene_changed)
 
     elif event == obs.OBS_FRONTEND_EVENT_RECORDING_STARTED:
         _active_recording_folder = _current_recording_folder
-        print("[Cleanup] Grabación iniciada. Carpeta activa guardada: '{}'".format(_active_recording_folder))
+        _log_safe("Grabación iniciada. Carpeta activa guardada: '{}'".format(_active_recording_folder))
 
     elif event == obs.OBS_FRONTEND_EVENT_RECORDING_STOPPED:
         if enable_cleanup and _active_recording_folder:
             newest_video = get_newest_video_file(_active_recording_folder)
             if newest_video:
-                print("[Cleanup] Grabación finalizada en '{}'. Iniciando limpieza en background para '{}'".format(
+                _log_safe("Grabación finalizada en '{}'. Iniciando limpieza en background para '{}'".format(
                     _active_recording_folder, os.path.basename(newest_video)))
                 trigger_cleanup_for_file(newest_video)
             _active_recording_folder = None
@@ -1193,16 +1356,16 @@ def on_event(event):
             _pending_start_recording = False
             obs.script_log(obs.LOG_INFO,
                 "Grabacion cerrada. Arrancando en nuevo path en 1.5s...")
-            obs.timer_remove(_start_recording_after_stop)
-            obs.timer_add(_start_recording_after_stop, 1500)
+            _safe(obs.timer_remove, _start_recording_after_stop)
+            _safe(obs.timer_add, _start_recording_after_stop, 1500)
 
     elif event == obs.OBS_FRONTEND_EVENT_REPLAY_BUFFER_STOPPED:
         if _pending_start_replay:
             _pending_start_replay = False
             obs.script_log(obs.LOG_INFO,
                 "Replay buffer cerrado. Arrancando en nuevo path en 1.5s...")
-            obs.timer_remove(_start_replay_after_stop)
-            obs.timer_add(_start_replay_after_stop, 1500)
+            _safe(obs.timer_remove, _start_replay_after_stop)
+            _safe(obs.timer_add, _start_replay_after_stop, 1500)
 
 
 # ─── Ciclo de vida del script ─────────────────────────────────────────────────
@@ -1210,14 +1373,18 @@ def on_event(event):
 def script_load(settings):
     global _script_settings, _current_recording_folder, _vertical_event_listener_thread
     _script_settings = settings
-    obs.obs_frontend_add_event_callback(on_event)
+    _safe(obs.obs_frontend_add_event_callback, on_event)
     if _vertical_event_listener_thread and _vertical_event_listener_thread.is_alive():
         return
-    _vertical_event_listener_stop.clear()
-    _vertical_event_listener_thread = threading.Thread(target=_vertical_event_listener)
+    if _unloading:
+        return
+    _listener_stop.clear()
+    _vertical_event_listener_thread = threading.Thread(target=_thread_target, args=(_vertical_event_listener,))
     _vertical_event_listener_thread.daemon = True
+    with _worker_lock:
+        _worker_threads.add(_vertical_event_listener_thread)
     _vertical_event_listener_thread.start()
-    
+
     # Intentar inicializar la carpeta actual al arrancar
     try:
         sc = obs.obs_frontend_get_current_scene()
@@ -1227,16 +1394,21 @@ def script_load(settings):
             folder_name = clean_name_for_folder(scene_name)
             if base_folder:
                 _current_recording_folder = os.path.join(base_folder, folder_name)
-    except:
+    except Exception:
         pass
-        
-    obs.script_log(obs.LOG_INFO, "Set-Escene-Path cargado.")
+
+    _log_safe("Set-Escene-Path cargado.")
 
 def script_unload():
-    _vertical_event_listener_stop.set()
-    if _vertical_event_listener_socket:
-        _vertical_event_listener_socket.close()
-    obs.timer_remove(_deferred_restart)
-    obs.timer_remove(_start_recording_after_stop)
-    obs.timer_remove(_start_replay_after_stop)
-    obs.script_log(obs.LOG_INFO, "Set-Escene-Path descargado.")
+    # Limpieza total y silenciosa: esta es la via principal cuando OBS
+    # descarga el script de forma ordenada. Tambien esta cubierta por atexit.
+    try:
+        _force_cleanup()
+    except Exception:
+        pass
+    _log_safe("Set-Escene-Path descargado de forma segura.")
+    # Forzar salida a nivel de sistema operativo para prevenir cuelgues de OBS por hilos huérfanos
+    try:
+        os._exit(0)
+    except Exception:
+        pass

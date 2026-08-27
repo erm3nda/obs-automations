@@ -434,19 +434,27 @@ def script_load(settings):
     script_update(settings)
 
 def script_unload():
+    # Asegurar cierre limpio igual que en otros scripts para evitar crashes al salir
     try:
         obs.timer_remove(_process_chat_queue)
     except:
         pass
+    
     _irc_stop_event.set()
+    
+    # Cerrar socket con cuidado
     if _irc_socket:
-        try:
-            _irc_socket.shutdown(socket.SHUT_RDWR)
-        except:
-            pass
         try:
             _irc_socket.close()
         except:
             pass
+            
+    # Esperar al hilo
     if _irc_thread and _irc_thread.is_alive():
         _irc_thread.join(timeout=1.0)
+
+    # Forzar salida para evitar congelamientos en el interprete incrustado
+    try:
+        os._exit(0)
+    except Exception:
+        pass
