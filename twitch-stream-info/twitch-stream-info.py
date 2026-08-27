@@ -33,7 +33,7 @@ def _log_safe(msg):
     if _unloading:
         return
     try:
-        obs.script_log(obs.LOG_WARNING, msg)
+        obs.script_log(obs.LOG_INFO, msg)
     except Exception:
         pass
 
@@ -257,14 +257,14 @@ def script_properties():
         client_id = obs.obs_data_get_string(_script_settings, "twitch_client_id")
         token = obs.obs_data_get_string(_script_settings, "twitch_oauth_token")
         if not client_id or not token:
-            obs.script_log(obs.LOG_WARNING, f"[{PLUGIN_NAME}] Faltan credenciales.")
+            obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Faltan credenciales.")
             return True
             
         cat_prop = obs.obs_properties_get(scene_props, "current_scene_category")
         current_cat = obs.obs_data_get_string(_script_settings, "current_scene_category")
         
         if not current_cat or len(current_cat) < 3:
-            obs.script_log(obs.LOG_WARNING, f"[{PLUGIN_NAME}] Escribe al menos 3 letras para buscar.")
+            obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Escribe al menos 3 letras para buscar.")
             return True
 
         obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Buscando categorías similares a: '{current_cat}'")
@@ -542,7 +542,7 @@ def on_import_settings(props, prop):
     settings_dir = obs.obs_data_get_string(_script_settings, "settings_path") or os.path.join(os.path.expanduser("~"), "Desktop")
     import_path = os.path.join(settings_dir, SETTINGS_FILENAME)
     if not os.path.exists(import_path):
-        obs.script_log(obs.LOG_WARNING, f"[{PLUGIN_NAME}] No se encontró ajustes en: {import_path}")
+        obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] No se encontró ajustes en: {import_path}")
         return True
     try:
         with open(import_path, "r", encoding="utf-8") as f: config_data = json.load(f)

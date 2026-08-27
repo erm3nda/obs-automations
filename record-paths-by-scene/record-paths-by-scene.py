@@ -278,7 +278,7 @@ def on_export_settings(props, prop):
             json.dump(config_data, f, indent=4, ensure_ascii=False)
         obs.script_log(obs.LOG_INFO, "Ajustes exportados a: {}".format(export_path))
     except Exception as e:
-        obs.script_log(obs.LOG_WARNING, "[Record-Paths] [WARNING] Error al exportar ajustes: {}".format(e))
+        obs.script_log(obs.LOG_INFO, "[Record-Paths] [INFO] Error al exportar ajustes: {}".format(e))
     return True
 
 def on_import_settings(props, prop):
@@ -288,7 +288,7 @@ def on_import_settings(props, prop):
     import_path = os.path.join(settings_dir, "record-paths-by-scene.json")
     
     if not os.path.exists(import_path):
-        obs.script_log(obs.LOG_WARNING, "[Record-Paths] [WARNING] No se encontró archivo en: {}".format(import_path))
+        obs.script_log(obs.LOG_INFO, "[Record-Paths] [INFO] No se encontró archivo en: {}".format(import_path))
         return True
         
     try:
@@ -326,7 +326,7 @@ def on_import_settings(props, prop):
 
         obs.script_log(obs.LOG_INFO, "Ajustes importados y aplicados correctamente desde el archivo JSON.")
     except Exception as e:
-        obs.script_log(obs.LOG_WARNING, "[Record-Paths] [WARNING] Error al importar ajustes: {}".format(e))
+        obs.script_log(obs.LOG_INFO, "[Record-Paths] [INFO] Error al importar ajustes: {}".format(e))
     return True
 
 def script_properties():
@@ -562,11 +562,11 @@ def script_update(settings):
                 obs.obs_source_release(sc)
                 set_paths_for_scene(scene_name)
         except Exception as e:
-            obs.script_log(obs.LOG_WARNING, "[Record-Paths] [WARNING] No se pudo pre-inicializar el path de escena: {}".format(e))
+            obs.script_log(obs.LOG_INFO, "[Record-Paths] [INFO] No se pudo pre-inicializar el path de escena: {}".format(e))
 
     if enable_cleanup and not _has_opencv:
-        obs.script_log(obs.LOG_WARNING,
-            "[Cleanup] ADVERTENCIA: La limpieza de videos está activada pero OpenCV (cv2) no está disponible. "
+        obs.script_log(obs.LOG_INFO,
+            "[Cleanup] AVISO: La limpieza de videos está activada pero OpenCV (cv2) no está disponible. "
             "Por favor, instala opencv-python en tu entorno de Python (ej: pip install opencv-python numpy) para usar esta función.")
 
 
@@ -1003,8 +1003,8 @@ def ensure_folder(path):
     try:
         os.makedirs(path, exist_ok=True)
     except Exception as e:
-        obs.script_log(obs.LOG_WARNING,
-            "[Record-Paths] [WARNING] No se pudo crear carpeta '{}': {}".format(path, e))
+        obs.script_log(obs.LOG_INFO,
+            "[Record-Paths] [INFO] No se pudo crear carpeta '{}': {}".format(path, e))
 
 def get_vertical_config_path():
     appdata = os.environ.get("APPDATA")
@@ -1299,7 +1299,7 @@ def handle_scene_changed():
     # Obtener nombre de la escena activa
     sc = obs.obs_frontend_get_current_scene()
     if sc is None:
-        obs.script_log(obs.LOG_WARNING, "[Record-Paths] [WARNING] No se pudo obtener la escena actual.")
+        obs.script_log(obs.LOG_INFO, "[Record-Paths] [INFO] No se pudo obtener la escena actual.")
         return
     scene_name = obs.obs_source_get_name(sc)
     obs.obs_source_release(sc)

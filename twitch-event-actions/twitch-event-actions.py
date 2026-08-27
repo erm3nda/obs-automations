@@ -82,7 +82,7 @@ def on_import_settings(props, prop):
     import_path = os.path.join(settings_dir, "twitch-event-actions-settings.json")
     
     if not os.path.exists(import_path):
-        obs.script_log(obs.LOG_WARNING, f"[Twitch-Event-Actions] No se encontró archivo en: {import_path}")
+        obs.script_log(obs.LOG_INFO, f"[Twitch-Event-Actions] No se encontró archivo en: {import_path}")
         return True
         
     try:
@@ -232,7 +232,7 @@ def on_refresh_token(properties, property):
     global oauth_token, refresh_token, client_id
     obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] Iniciando refresco de token...")
     if not refresh_token:
-        obs.script_log(obs.LOG_WARNING, "[Twitch-Event-Actions] No hay refresh token configurado.")
+        obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] No hay refresh token configurado.")
         return True
     url = "https://twitchtokengenerator.com/api/refresh/{}".format(refresh_token.strip())
     try:
@@ -283,7 +283,7 @@ def on_get_broadcaster_id(properties, property):
                 obs.obs_data_set_string(_script_settings, "chat_channel", chat_channel)
             _restart_irc_listener()
         else:
-            obs.script_log(obs.LOG_WARNING, "[Twitch-Event-Actions] ⚠️ No se pudieron obtener los datos de usuario.")
+            obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] ℹ️ No se pudieron obtener los datos de usuario.")
     except Exception as e:
         obs.script_log(obs.LOG_ERROR, f"[Twitch-Event-Actions] ❌ Error detectando ID: {e}")
     return True
