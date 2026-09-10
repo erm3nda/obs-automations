@@ -3,6 +3,7 @@ import difflib
 import glob
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -40,6 +41,12 @@ _listener_socket = None
 _move_lock = threading.Lock()
 _processed_files = set()
 _move_lock_path = os.path.join(tempfile.gettempdir(), "aitum-vertical-options.lock")
+
+_SCENE_ALIASES = {
+    "bfv": "battlefield v",
+    "bf6": "battlefield 6",
+    "fv5": "battlefield v",
+}
 
 
 def script_description():
@@ -174,10 +181,11 @@ def script_update(settings):
 
 
 def _scene_key(name):
-    return tuple(
-        word for word in __import__("re").findall(r"[a-z0-9]+", name.lower())
-        if word not in ("escene", "scene", "vertical", "horizontal")
-    )[:2]
+    words = re.findall(r"[a-z0-9]+", name.lower())
+    words = [word for word in words if word not in ("escene", "scene", "vertical", "horizontal")]
+    if words and words[0] in _SCENE_ALIASES:
+        words = _SCENE_ALIASES[words[0]].split() + words[1:]
+    return tuple(words[:2])
 
 
 def _best_vertical_scene(horizontal_name, candidates):
@@ -267,7 +275,7 @@ def _vendor_request(request_type, request_data=None):
                 response_data = message.get("d", {}).get("responseData", {})
                 return response_data.get("responseData", response_data)
     except Exception as error:
-        obs.script_log(obs.LOG_WARNING, "Aitum Vertical WebSocket: {}".format(error))
+        obs.script_log(obs.LOG_INFO, "Aitum Vertical no disponible: {}".format(error))
         return None
     finally:
         sock.close()
@@ -282,7 +290,7 @@ def _switch_vertical_scene(horizontal_name):
         obs.script_log(obs.LOG_INFO, "Escena vertical sincronizada: {}".format(vertical_name))
         _update_vertical_recording_controls()
     else:
-        obs.script_log(obs.LOG_WARNING, "No se encontró escena vertical para: {}".format(horizontal_name))
+        obs.script_log(obs.LOG_INFO, "No hay escena vertical coincidente para: {}".format(horizontal_name))
 
 
 def _update_vertical_recording_controls():
