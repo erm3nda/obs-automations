@@ -30,8 +30,6 @@ Then in OBS: **Tools → Scripts → [+] → record-paths-by-scene.py**
 | Auto-start recording | Start recording automatically on scene switch |
 | Auto-start replay buffer | Start replay buffer automatically on scene switch |
 
-> **Note for Aitum Vertical users:** This plugin is compatible with Aitum Vertical, providing additional integration options for managing vertical recording paths automatically.
-
 ## Scene naming
 
 Name your scenes after the game. The script strips `™ ® ©`, Windows-invalid characters, and a trailing `escene` suffix.
