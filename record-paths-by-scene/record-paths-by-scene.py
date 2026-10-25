@@ -87,7 +87,7 @@ def on_export_settings(props, prop):
             json.dump(config_data, f, indent=4, ensure_ascii=False)
         obs.script_log(obs.LOG_INFO, "Ajustes exportados a: {}".format(export_path))
     except Exception as e:
-        obs.script_log(obs.LOG_WARNING, "Error al exportar ajustes: {}".format(e))
+        obs.script_log(obs.LOG_INFO, "[ERROR] Error al exportar ajustes: {}".format(e))
     return True
 
 def on_import_settings(props, prop):
@@ -97,7 +97,7 @@ def on_import_settings(props, prop):
     import_path = os.path.join(settings_dir, "record-paths-by-scene.json")
     
     if not os.path.exists(import_path):
-        obs.script_log(obs.LOG_WARNING, "No se encontró archivo en: {}".format(import_path))
+        obs.script_log(obs.LOG_INFO, "[ERROR] No se encontró archivo en: {}".format(import_path))
         return True
         
     try:
@@ -127,7 +127,7 @@ def on_import_settings(props, prop):
 
         obs.script_log(obs.LOG_INFO, "Ajustes importados y aplicados correctamente desde el archivo JSON.")
     except Exception as e:
-        obs.script_log(obs.LOG_WARNING, "Error al importar ajustes: {}".format(e))
+        obs.script_log(obs.LOG_INFO, "[ERROR] Error al importar ajustes: {}".format(e))
     return True
 
 def script_properties():
@@ -301,11 +301,11 @@ def script_update(settings):
                 obs.obs_source_release(sc)
                 set_paths_for_scene(scene_name)
         except Exception as e:
-            obs.script_log(obs.LOG_WARNING, "No se pudo pre-inicializar el path de escena: {}".format(e))
+            obs.script_log(obs.LOG_INFO, "[ERROR] No se pudo pre-inicializar el path de escena: {}".format(e))
 
     if enable_cleanup and not _has_opencv:
-        obs.script_log(obs.LOG_WARNING,
-            "[Cleanup] ADVERTENCIA: La limpieza de videos está activada pero OpenCV (cv2) no está disponible. "
+        obs.script_log(obs.LOG_INFO,
+            "[ERROR] [Cleanup] La limpieza de videos está activada pero OpenCV (cv2) no está disponible. "
             "Por favor, instala opencv-python en tu entorno de Python (ej: pip install opencv-python numpy) para usar esta función.")
 
 
@@ -329,6 +329,12 @@ def clean_name_for_folder(name):
     name = re.sub(r'\s*\((tm|r|c)\)\s*', ' ', name, flags=re.IGNORECASE)
     name = re.sub(r'[<>:"/\\|?*]', ' ', name)
     name = re.sub(r'\s+', ' ', name).strip()
+    name = re.sub(
+        r'(?:\s+(?:escene|vertical))+\s*$',
+        '',
+        name,
+        flags=re.IGNORECASE
+    ).strip()
     # Quitar palabras configuradas por el usuario
     if ignored_words:
         words = [w.strip() for w in ignored_words.split(',')]
@@ -349,8 +355,8 @@ def ensure_folder(path):
     try:
         os.makedirs(path, exist_ok=True)
     except Exception as e:
-        obs.script_log(obs.LOG_WARNING,
-            "No se pudo crear carpeta '{}': {}".format(path, e))
+        obs.script_log(obs.LOG_INFO,
+            "[ERROR] No se pudo crear carpeta '{}': {}".format(path, e))
 
 def set_paths_for_scene(scene_name, dry_run=False):
     global _current_recording_folder
@@ -377,7 +383,7 @@ def set_paths_for_scene(scene_name, dry_run=False):
     
     config = obs.obs_frontend_get_profile_config()
     if config is None:
-        obs.script_log(obs.LOG_WARNING, "No se pudo obtener el config del perfil.")
+        obs.script_log(obs.LOG_INFO, "[ERROR] No se pudo obtener el config del perfil.")
         return False
         
     obs.config_set_string(config, "SimpleOutput", "FilePath", target)
@@ -626,15 +632,15 @@ def handle_scene_changed():
 
     # Guard: carpeta base no configurada
     if not base_folder or not base_folder.strip():
-        obs.script_log(obs.LOG_WARNING,
-            "Set-Escene-Path: carpeta base no configurada. "
+        obs.script_log(obs.LOG_INFO,
+            "[ERROR] Set-Escene-Path: carpeta base no configurada. "
             "Ve a Herramientas > Scripts y configura la 'Carpeta base'.")
         return
 
     # Obtener nombre de la escena activa
     sc = obs.obs_frontend_get_current_scene()
     if sc is None:
-        obs.script_log(obs.LOG_WARNING, "No se pudo obtener la escena actual.")
+        obs.script_log(obs.LOG_INFO, "[ERROR] No se pudo obtener la escena actual.")
         return
     scene_name = obs.obs_source_get_name(sc)
     obs.obs_source_release(sc)

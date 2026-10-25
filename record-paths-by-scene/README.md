@@ -8,7 +8,7 @@ This plugin complements OBS native scene switching by handling automations that 
 
 ## Features
 
-- Folder name derived from the active scene name (strips invalid characters and trailing `escene` suffix).
+- Folder and filename names derived from the active scene name (strips invalid characters and trailing `escene` and/or `vertical` suffixes).
 - **Auto-start** recording and/or replay buffer on scene switch.
 - **Keep recording** mode — updates path silently without interrupting active recordings.
 - Stream settings are never touched (controlled manually via OBS).
@@ -32,9 +32,9 @@ Then in OBS: **Tools → Scripts → [+] → record-paths-by-scene.py**
 
 ## Scene naming
 
-Name your scenes after the game. The script strips `™ ® ©`, Windows-invalid characters, and a trailing `escene` suffix.
+Name your scenes after the game. The script strips `™ ® ©`, Windows-invalid characters, and trailing `escene` and/or `vertical` suffixes (case-insensitive).
 
-Example: `BFV escene` → folder `BFV`
+Examples: `BFV escene` → folder `BFV`; `Battlefield V vertical escene` → folder `Battlefield V`.
 
 ---
 *Disclaimer: This project was primarily developed using Gemini Flash (Google AI Studio) and, to a lesser extent, Kilo free models.*
