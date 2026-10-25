@@ -1,13 +1,13 @@
 import base64
 import difflib
 import glob
+import hashlib
 import json
 import os
 import re
 import shutil
 import socket
 import struct
-import tempfile
 import threading
 import time
 import uuid
@@ -35,12 +35,12 @@ vertical_cleanup_threshold = 90
 
 _script_settings = None
 _vertical_target_folder = None
+_current_scene_name = ""
 _listener_thread = None
 _listener_stop = threading.Event()
 _listener_socket = None
 _move_lock = threading.Lock()
 _processed_files = set()
-_move_lock_path = os.path.join(tempfile.gettempdir(), "aitum-vertical-options.lock")
 
 _SCENE_ALIASES = {
     "bfv": "battlefield v",
@@ -80,14 +80,14 @@ def on_export_settings(props, prop):
             json.dump(data, file, indent=4, ensure_ascii=False)
         obs.script_log(obs.LOG_INFO, "Ajustes de Aitum Vertical exportados: {}".format(path))
     except Exception as error:
-        obs.script_log(obs.LOG_WARNING, "Error al exportar ajustes verticales: {}".format(error))
+        obs.script_log(obs.LOG_INFO, "[ERROR] Error al exportar ajustes verticales: {}".format(error))
     return True
 
 
 def on_import_settings(props, prop):
     path = os.path.join(_settings_directory(), "aitum-vertical-options.json")
     if not os.path.isfile(path):
-        obs.script_log(obs.LOG_WARNING, "No se encontró el archivo: {}".format(path))
+        obs.script_log(obs.LOG_INFO, "[ERROR] No se encontró el archivo: {}".format(path))
         return True
     try:
         with open(path, "r", encoding="utf-8") as file:
@@ -110,7 +110,7 @@ def on_import_settings(props, prop):
             obs.obs_data_release(target)
         obs.script_log(obs.LOG_INFO, "Ajustes de Aitum Vertical importados.")
     except Exception as error:
-        obs.script_log(obs.LOG_WARNING, "Error al importar ajustes verticales: {}".format(error))
+        obs.script_log(obs.LOG_INFO, "[ERROR] Error al importar ajustes verticales: {}".format(error))
     return True
 
 
@@ -178,61 +178,155 @@ def script_update(settings):
     enable_vertical_cleanup = obs.obs_data_get_bool(settings, "enable_vertical_cleanup")
     vertical_min_size_mb = obs.obs_data_get_int(settings, "vertical_min_size_mb")
     vertical_cleanup_threshold = obs.obs_data_get_int(settings, "vertical_cleanup_threshold")
+    _refresh_target_folder_for_current_scene()
 
 
 def _scene_key(name):
     words = re.findall(r"[a-z0-9]+", name.lower())
-    words = [word for word in words if word not in ("escene", "scene", "vertical", "horizontal")]
+    words = [word for word in words if word not in (
+        "escene", "escena", "scene", "vertical", "horizontal"
+    )]
     if words and words[0] in _SCENE_ALIASES:
         words = _SCENE_ALIASES[words[0]].split() + words[1:]
-    return tuple(words[:2])
+    return tuple(words)
 
 
 def _best_vertical_scene(horizontal_name, candidates):
     key = _scene_key(horizontal_name)
-    matches = [name for name in candidates if _scene_key(name) == key]
-    if not matches:
+    if not key:
         return None
-    return max(matches, key=lambda name: difflib.SequenceMatcher(None, horizontal_name.lower(), name.lower()).ratio())
+
+    keyed_candidates = [(name, _scene_key(name)) for name in candidates]
+    keyed_candidates = [(name, candidate_key) for name, candidate_key in keyed_candidates if candidate_key]
+    exact_matches = [name for name, candidate_key in keyed_candidates if candidate_key == key]
+    if exact_matches:
+        return exact_matches[0]
+    if not keyed_candidates:
+        return None
+
+    normalized_name = " ".join(key)
+    return max(
+        keyed_candidates,
+        key=lambda item: difflib.SequenceMatcher(None, normalized_name, " ".join(item[1])).ratio()
+    )[0]
+
+
+def _receive_exact(sock, size):
+    data = bytearray()
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            return None
+        data.extend(chunk)
+    return bytes(data)
 
 
 def _read_frame(sock):
-    def receive(size):
-        data = b""
-        while len(data) < size:
-            chunk = sock.recv(size - len(data))
-            if not chunk:
-                return None
-            data += chunk
-        return data
-
-    header = receive(2)
+    header = _receive_exact(sock, 2)
     if not header:
         return None
     first, second = header
     length = second & 0x7F
     if length == 126:
-        length = struct.unpack(">H", receive(2))[0]
+        extended_length = _receive_exact(sock, 2)
+        if extended_length is None:
+            return None
+        length = struct.unpack(">H", extended_length)[0]
     elif length == 127:
-        length = struct.unpack(">Q", receive(8))[0]
+        extended_length = _receive_exact(sock, 8)
+        if extended_length is None:
+            return None
+        length = struct.unpack(">Q", extended_length)[0]
+    if length > 16 * 1024 * 1024:
+        raise ValueError("trama WebSocket demasiado grande")
+    mask = None
     if second & 0x80:
-        receive(4)
-    payload = receive(length)
-    return (first & 0x0F, payload) if payload is not None else None
+        mask = _receive_exact(sock, 4)
+        if mask is None:
+            return None
+    payload = _receive_exact(sock, length)
+    if payload is None:
+        return None
+    if mask:
+        payload = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+    return (first & 0x0F, payload)
 
 
-def _send_text(sock, text):
-    payload = text.encode("utf-8")
+def _send_frame(sock, opcode, payload):
     mask = os.urandom(4)
     masked = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
     length = len(masked)
     if length < 126:
-        header = bytes([0x81, 0x80 | length])
+        header = bytes([0x80 | opcode, 0x80 | length])
     elif length < 65536:
-        header = bytes([0x81, 0x80 | 126]) + struct.pack(">H", length)
+        header = bytes([0x80 | opcode, 0x80 | 126]) + struct.pack(">H", length)
     else:
-        header = bytes([0x81, 0x80 | 127]) + struct.pack(">Q", length)
+        header = bytes([0x80 | opcode, 0x80 | 127]) + struct.pack(">Q", length)
     sock.sendall(header + mask + masked)
+
+
+def _send_text(sock, text):
+    _send_frame(sock, 1, text.encode("utf-8"))
+
+
+def _read_json_message(sock):
+    while True:
+        frame = _read_frame(sock)
+        if frame is None or frame[0] == 8:
+            return None
+        if frame[0] == 9:
+            _send_frame(sock, 10, frame[1])
+            continue
+        if frame[0] != 1:
+            continue
+        return json.loads(frame[1].decode("utf-8"))
+
+
+def _websocket_handshake(sock, event_subscriptions=None):
+    key = base64.b64encode(os.urandom(16)).decode("ascii")
+    request = (
+        "GET / HTTP/1.1\r\nHost: 127.0.0.1:4455\r\nUpgrade: websocket\r\n"
+        "Connection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    ).format(key)
+    sock.sendall(request.encode("ascii"))
+
+    response = bytearray()
+    while not response.endswith(b"\r\n\r\n"):
+        chunk = sock.recv(1)
+        if not chunk:
+            raise RuntimeError("OBS WebSocket cerró la conexión durante el handshake")
+        response.extend(chunk)
+        if len(response) > 65536:
+            raise RuntimeError("cabeceras de OBS WebSocket demasiado grandes")
+
+    lines = response.decode("iso-8859-1").split("\r\n")
+    if not lines[0].startswith("HTTP/1.1 101 "):
+        raise RuntimeError("OBS rechazó el handshake WebSocket: {}".format(lines[0]))
+    headers = {}
+    for line in lines[1:]:
+        if ":" in line:
+            name, value = line.split(":", 1)
+            headers[name.strip().lower()] = value.strip()
+    expected_accept = base64.b64encode(hashlib.sha1(
+        (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+    ).digest()).decode("ascii")
+    if headers.get("sec-websocket-accept") != expected_accept:
+        raise RuntimeError("respuesta Sec-WebSocket-Accept inválida")
+
+    hello = _read_json_message(sock)
+    if not hello or hello.get("op") != 0:
+        raise RuntimeError("handshake de OBS WebSocket inválido")
+    identify = {"rpcVersion": 1}
+    if event_subscriptions is not None:
+        identify["eventSubscriptions"] = event_subscriptions
+    _send_text(sock, json.dumps({"op": 1, "d": identify}, separators=(",", ":")))
+
+    while True:
+        message = _read_json_message(sock)
+        if not message:
+            raise RuntimeError("OBS WebSocket cerró la conexión durante la identificación")
+        if message.get("op") == 2:
+            return
 
 
 def _vendor_request(request_type, request_data=None):
@@ -244,38 +338,17 @@ def _vendor_request(request_type, request_data=None):
     sock.settimeout(5)
     try:
         sock.connect(("127.0.0.1", 4455))
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        handshake = ("GET / HTTP/1.1\r\nHost: 127.0.0.1:4455\r\nUpgrade: websocket\r\n"
-                     "Connection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\n\r\n").format(key)
-        sock.sendall(handshake.encode("ascii"))
-        response = b""
-        while b"\r\n\r\n" not in response:
-            response += sock.recv(1)
-        hello = _read_frame(sock)
-        if not hello or json.loads(hello[1].decode("utf-8")).get("op") != 0:
-            raise RuntimeError("handshake de OBS WebSocket inválido")
-        _send_text(sock, json.dumps({"op": 1, "d": {"rpcVersion": 1}}, separators=(",", ":")))
-        while True:
-            frame = _read_frame(sock)
-            if not frame:
-                raise RuntimeError("OBS WebSocket cerró la conexión")
-            if frame[0] in (8, 9, 10):
-                continue
-            if json.loads(frame[1].decode("utf-8")).get("op") == 2:
-                break
+        _websocket_handshake(sock)
         _send_text(sock, json.dumps(request, separators=(",", ":")))
         while True:
-            frame = _read_frame(sock)
-            if not frame:
+            message = _read_json_message(sock)
+            if not message:
                 return None
-            if frame[0] in (8, 9, 10):
-                continue
-            message = json.loads(frame[1].decode("utf-8"))
             if message.get("op") == 7 and message.get("d", {}).get("requestId") == request_id:
                 response_data = message.get("d", {}).get("responseData", {})
                 return response_data.get("responseData", response_data)
     except Exception as error:
-        obs.script_log(obs.LOG_INFO, "Aitum Vertical no disponible: {}".format(error))
+        obs.script_log(obs.LOG_INFO, "[ERROR] Aitum Vertical no disponible: {}".format(error))
         return None
     finally:
         sock.close()
@@ -308,17 +381,29 @@ def _update_vertical_recording_controls():
 
 
 def _clean_name(name):
-    import re
     name = re.sub(r"[<>:\"/\\|?*]", " ", name)
     name = re.sub(r"\s+", " ", name).strip()
     return name or "unnamed"
 
 
 def _update_target_folder(scene_name):
-    global _vertical_target_folder
+    global _vertical_target_folder, _current_scene_name
+    _current_scene_name = scene_name
+    _vertical_target_folder = None
     if base_folder:
         _vertical_target_folder = os.path.join(base_folder, _clean_name(scene_name))
         os.makedirs(_vertical_target_folder, exist_ok=True)
+
+
+def _refresh_target_folder_for_current_scene():
+    scene = obs.obs_frontend_get_current_scene()
+    if not scene:
+        _update_target_folder("")
+        return
+    try:
+        _update_target_folder(obs.obs_source_get_name(scene))
+    finally:
+        obs.obs_source_release(scene)
 
 
 def _vertical_config_path():
@@ -329,7 +414,7 @@ def _vertical_config_path():
     return path if os.path.isfile(path) else None
 
 
-def _find_vertical_file(event_type, minimum_time):
+def _find_vertical_file(event_type, minimum_time, scene_name):
     config_path = _vertical_config_path()
     if not config_path:
         return None
@@ -340,16 +425,29 @@ def _find_vertical_file(event_type, minimum_time):
         folders = {canvas.get(key, "") for canvas in data.get("canvas", [])}
         folders.discard("")
         candidates = []
+        scene_key = _scene_key(scene_name)
         for folder in folders:
             for item in glob.glob(os.path.join(folder, "*")):
+                filename = os.path.basename(item).lower()
+                is_backtrack = "backtrack" in filename
                 if (os.path.isfile(item) and item.lower().endswith((".mkv", ".mp4", ".mov", ".ts", ".flv"))
-                        and (event_type != "backtrack_saved" or "backtrack" in os.path.basename(item).lower())
-                        and os.path.getmtime(item) >= minimum_time - 2):
+                        and (is_backtrack if event_type == "backtrack_saved" else not is_backtrack)
+                        and os.path.getmtime(item) >= minimum_time - 2
+                        and scene_key and _contains_scene_key(filename, scene_key)):
                     candidates.append(item)
         return max(candidates, key=os.path.getmtime) if candidates else None
     except Exception as error:
-        obs.script_log(obs.LOG_WARNING, "No se pudo localizar archivo vertical: {}".format(error))
+        obs.script_log(obs.LOG_INFO, "[ERROR] No se pudo localizar archivo vertical: {}".format(error))
         return None
+
+
+def _contains_scene_key(filename, scene_key):
+    words = re.findall(r"[a-z0-9]+", filename.lower())
+    words = [word for word in words if word not in ("backtrack", "replay")]
+    filename_key = _scene_key(" ".join(words))
+    width = len(scene_key)
+    return any(filename_key[index:index + width] == scene_key
+               for index in range(len(filename_key) - width + 1))
 
 
 def _cleanup_file(path):
@@ -376,68 +474,106 @@ def _cleanup_file(path):
         if valid and (black / valid) * 100 >= vertical_cleanup_threshold:
             os.remove(path)
     except Exception as error:
-        obs.script_log(obs.LOG_WARNING, "Error limpiando archivo vertical: {}".format(error))
+        obs.script_log(obs.LOG_INFO, "[ERROR] Error limpiando archivo vertical: {}".format(error))
 
 
-def _organize_file(event_type, event_time):
-    source = None
+def _wait_for_stable_file(event_type, event_time, scene_name):
+    previous_state = None
     for _ in range(12):
+        candidate = _find_vertical_file(event_type, event_time, scene_name)
+        if candidate:
+            try:
+                stat = os.stat(candidate)
+                state = (candidate, stat.st_size, stat.st_mtime_ns)
+            except OSError:
+                state = None
+            if state and state == previous_state:
+                return candidate
+            previous_state = state
+        else:
+            previous_state = None
         time.sleep(0.5)
-        source = _find_vertical_file(event_type, event_time)
-        if source:
-            break
-    if not source:
+    return None
+
+
+def _organize_file(event_type, event_time, target_folder, scene_name):
+    if not move_vertical_files and not enable_vertical_cleanup:
         return
-    target = _vertical_target_folder
-    if move_vertical_files and target:
-        try:
-            with _move_lock:
-                if source in _processed_files:
+    source = _wait_for_stable_file(event_type, event_time, scene_name)
+    if not source:
+        obs.script_log(
+            obs.LOG_INFO,
+            "[ERROR] No se encontró un archivo vertical reciente que coincida con la escena activa."
+        )
+        return
+    if move_vertical_files and target_folder:
+        destination = os.path.join(target_folder, os.path.basename(source))
+        for attempt in range(12):
+            try:
+                with _move_lock:
+                    if source in _processed_files:
+                        return
+                    if not os.path.isfile(source):
+                        return
+                    os.makedirs(target_folder, exist_ok=True)
+                    shutil.move(source, destination)
+                    _processed_files.add(source)
+                    source = destination
+                break
+            except PermissionError as error:
+                if attempt == 11:
+                    obs.script_log(obs.LOG_INFO, "[ERROR] No se pudo mover archivo vertical: {}".format(error))
                     return
-                os.makedirs(target, exist_ok=True)
-                destination = os.path.join(target, os.path.basename(source))
-                shutil.move(source, destination)
-                _processed_files.add(source)
-                source = destination
-        except Exception as error:
-            obs.script_log(obs.LOG_WARNING, "No se pudo mover archivo vertical: {}".format(error))
+                time.sleep(0.5)
+            except Exception as error:
+                obs.script_log(obs.LOG_INFO, "[ERROR] No se pudo mover archivo vertical: {}".format(error))
+                return
     if enable_vertical_cleanup:
         threading.Thread(target=_cleanup_file, args=(source,), daemon=True).start()
 
 
 def _event_listener():
     global _listener_socket
+    connection_error_logged = False
     while not _listener_stop.is_set():
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         _listener_socket = sock
-        sock.settimeout(1)
+        sock.settimeout(5)
         try:
             sock.connect(("127.0.0.1", 4455))
-            key = base64.b64encode(os.urandom(16)).decode("ascii")
-            sock.sendall(("GET / HTTP/1.1\r\nHost: 127.0.0.1:4455\r\nUpgrade: websocket\r\n"
-                          "Connection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\n\r\n").format(key).encode("ascii"))
-            while b"\r\n\r\n" not in sock.recv(4096):
-                pass
-            _read_frame(sock)
-            _send_text(sock, json.dumps({"op": 1, "d": {"rpcVersion": 1, "eventSubscriptions": 576}}))
-            _read_frame(sock)
+            _websocket_handshake(sock, 576)
+            sock.settimeout(None)
+            connection_error_logged = False
             while not _listener_stop.is_set():
-                frame = _read_frame(sock)
-                if not frame or frame[0] in (8, 9, 10):
-                    continue
-                message = json.loads(frame[1].decode("utf-8"))
+                message = _read_json_message(sock)
+                if message is None:
+                    break
                 if message.get("op") != 5:
                     continue
                 event = message.get("d", {}).get("eventData", {})
                 if (message.get("d", {}).get("eventType") == "VendorEvent"
                         and event.get("vendorName") == "aitum-vertical-canvas"
                         and event.get("eventType") in ("backtrack_saved", "recording_stopped")):
-                    threading.Thread(target=_organize_file, args=(event["eventType"], time.time()), daemon=True).start()
-        except Exception:
-            pass
+                    threading.Thread(
+                        target=_organize_file,
+                        args=(
+                            event["eventType"],
+                            time.time(),
+                            _vertical_target_folder,
+                            _current_scene_name,
+                        ),
+                        daemon=True
+                    ).start()
+        except Exception as error:
+            if not _listener_stop.is_set() and not connection_error_logged:
+                obs.script_log(obs.LOG_INFO, "[ERROR] Listener de Aitum Vertical: {}".format(error))
+                connection_error_logged = True
         finally:
-            sock.close()
-            _listener_socket = None
+            try:
+                sock.close()
+            finally:
+                if _listener_socket is sock:
+                    _listener_socket = None
         _listener_stop.wait(3)
 
 
@@ -475,5 +611,9 @@ def script_load(settings):
 def script_unload():
     _listener_stop.set()
     if _listener_socket:
+        try:
+            _listener_socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         _listener_socket.close()
     obs.script_log(obs.LOG_INFO, "Aitum Vertical Options descargado.")
