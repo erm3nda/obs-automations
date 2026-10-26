@@ -1,4 +1,4 @@
-# install-all.ps1
+﻿# install-all.ps1
 # Script maestro de instalación para todos los plugins de OBS Studio.
 # Se autoeleva UNA SOLA VEZ a Administrador y ejecuta recursivamente los install.ps1 de cada carpeta.
 
@@ -16,7 +16,7 @@ Write-Host "   Instalador Maestro de Plugins OBS (obs-automations)" -ForegroundC
 Write-Host "=========================================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Buscar todos los scripts install.ps1 que esten dentro de las subcarpetas (excluyendo este propio script)
+# Buscar todos los scripts install.ps1 que estén dentro de las subcarpetas (excluyendo este propio script)
 $installScripts = Get-ChildItem -Path $PSScriptRoot -Recurse -Filter "install.ps1" | Where-Object { $_.FullName -ne $PSCommandPath }
 
 if (-not $installScripts) {
@@ -54,11 +54,10 @@ foreach ($script in $installScripts) {
 
 Write-Host ""
 Write-Host "=========================================================" -ForegroundColor Green
-Write-Host "   ¡Exito! Se han instalado $installedCount plugins en OBS." -ForegroundColor Green
+Write-Host "   ¡Éxito! Se han instalado $installedCount plugins en OBS." -ForegroundColor Green
 Write-Host "=========================================================" -ForegroundColor Green
 Write-Host "Directorio destino: $env:ProgramFiles\obs-studio\data\obs-plugins\frontend-tools\scripts\" -ForegroundColor DarkCyan
 Write-Host "En OBS Studio: Ve a Herramientas > Scripts y haz clic en Recargar / '+'" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Cerrando automáticamente en 3 segundos..." -ForegroundColor DarkGray
 Start-Sleep -Seconds 3
-

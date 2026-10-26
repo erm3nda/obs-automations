@@ -15,6 +15,7 @@ import base64
 import hashlib
 import struct
 import ctypes
+import tempfile
 from ctypes import wintypes
 
 # --- Variables Globales ---
@@ -30,12 +31,19 @@ _active_hide_timers = {}
 _chat_message_history = []
 _test_msg_counter = 0
 _event_queue = []
+_background_log_queue = []
 _event_configs = {}
 _event_settings_loaded = False
 _selected_event_key = "chat"
 _event_ui_properties = {}
 _credentials_loaded = False
 _fallback_warning_logged = False
+_applying_property_settings = False
+_refreshing_event_controls = False
+_credential_status_property = None
+_credential_validation_status = "Almacenadas, todavía sin comprobar."
+_credential_storage_backend = "Sin credenciales verificadas."
+_credential_migration_pending = False
 
 CREDENTIAL_TARGET = "Twitch-Event-Actions"
 CREDENTIAL_FILE = ".obs-twitch-event-actions-credentials.json"
@@ -112,6 +120,9 @@ def script_description():
     return "Twitch Event Actions: Automatiza acciones en OBS basadas en eventos de Twitch."
 
 def _log_error(message):
+    obs.script_log(obs.LOG_INFO, "[ERROR] {}".format(_redact_secrets(message)))
+
+def _redact_secrets(message):
     message = str(message)
     for key in CREDENTIAL_KEYS:
         secret = globals().get(key, "")
@@ -134,7 +145,11 @@ def _log_error(message):
                 )
         for secret_form in sorted(secret_forms, key=len, reverse=True):
             message = message.replace(secret_form, "[REDACTED]")
-    obs.script_log(obs.LOG_INFO, "[ERROR] {}".format(message))
+    return message
+
+def _queue_background_log(level, message):
+    with _chat_queue_lock:
+        _background_log_queue.append((level, _redact_secrets(message)))
 
 def _credential_file_path():
     return os.path.join(os.path.expanduser("~"), CREDENTIAL_FILE)
@@ -217,10 +232,33 @@ def _read_fallback_credentials():
             stored = json.load(credential_file)
         if not isinstance(stored, dict):
             raise ValueError("Credential file must contain a JSON object")
-        return _normalize_credentials(stored)
+        credentials = _normalize_credentials(stored)
+        return credentials
     except (OSError, ValueError, json.JSONDecodeError) as error:
         _log_error("[Twitch-Event-Actions] No se pudieron leer las credenciales locales: {}".format(error))
         return {}
+
+def _write_fallback_credentials(credentials):
+    path = _credential_file_path()
+    directory = os.path.dirname(path)
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=CREDENTIAL_FILE + ".",
+        suffix=".tmp",
+        dir=directory,
+    )
+    try:
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as credential_file:
+            json.dump(_normalize_credentials(credentials), credential_file, ensure_ascii=False)
+            credential_file.flush()
+            os.fsync(credential_file.fileno())
+        os.replace(temporary_path, path)
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
 
 def _remove_fallback_credentials(strict=False):
     try:
@@ -238,50 +276,213 @@ def _normalize_credentials(credentials):
         for key in CREDENTIAL_KEYS
     }
 
+def _credentials_from_legacy_config(config_data):
+    if not isinstance(config_data, dict):
+        raise ValueError("El archivo de ajustes debe contener un objeto JSON")
+    aliases = {
+        "client_id": ("client_id", "twitch_client_id"),
+        "oauth_token": ("oauth_token", "twitch_oauth_token", "access_token", "twitch_access_token"),
+        "refresh_token": ("refresh_token", "twitch_refresh_token"),
+    }
+    credentials = {}
+    for key, legacy_keys in aliases.items():
+        for legacy_key in legacy_keys:
+            value = config_data.get(legacy_key)
+            if isinstance(value, str) and value:
+                credentials[key] = value
+                break
+    return credentials
+
 def _load_credentials():
+    global _credential_storage_backend, _credential_migration_pending
     if os.name == "nt":
+        stored_credentials = {}
+        secure_store_error = None
         try:
-            credentials = _read_windows_credentials()
-            if credentials is not None:
-                _remove_fallback_credentials()
-                return credentials
+            stored_credentials = _read_windows_credentials() or {}
         except (OSError, ValueError, json.JSONDecodeError) as error:
+            secure_store_error = error
             _log_fallback_warning(
                 "No se pudo acceder al Administrador de credenciales de Windows ({}).".format(error)
             )
-    else:
-        _log_fallback_warning("Este sistema no dispone de un almacén seguro integrado.")
-    return _read_fallback_credentials()
+        fallback_credentials = _read_fallback_credentials()
+        if any(stored_credentials.values()):
+            conflicts = [
+                key
+                for key in CREDENTIAL_KEYS
+                if stored_credentials.get(key)
+                and fallback_credentials.get(key)
+                and stored_credentials[key] != fallback_credentials[key]
+            ]
+            if conflicts:
+                _credential_storage_backend = (
+                    "Credential Manager verificado, pero el archivo SIN CIFRAR contiene valores distintos: {}"
+                ).format(_credential_file_path())
+                _credential_migration_pending = True
+                _log_error(
+                    "[Twitch-Event-Actions] Credential Manager y fallback difieren; "
+                    "se conserva el archivo local sin cifrar para evitar perder credenciales."
+                )
+                return stored_credentials
+            credentials = {
+                key: stored_credentials.get(key) or fallback_credentials.get(key, "")
+                for key in CREDENTIAL_KEYS
+            }
+            if any(fallback_credentials.values()) and credentials != stored_credentials:
+                try:
+                    _write_windows_credentials(credentials)
+                    if _read_windows_credentials() != credentials:
+                        raise OSError("Credential Manager verification failed")
+                    _remove_fallback_credentials(strict=True)
+                    _credential_storage_backend = "Administrador de credenciales de Windows (verificado)"
+                except (OSError, ValueError) as error:
+                    _credential_storage_backend = (
+                        "Administrador de credenciales + archivo local SIN CIFRAR ({}); "
+                        "migración pendiente".format(_credential_file_path())
+                    )
+                    _log_error(
+                        "[Twitch-Event-Actions] No se pudo completar la migración del fallback: {}".format(error)
+                    )
+            else:
+                if any(fallback_credentials.values()):
+                    try:
+                        _remove_fallback_credentials(strict=True)
+                    except OSError as error:
+                        _credential_storage_backend = (
+                            "Administrador de credenciales verificado; queda archivo local SIN CIFRAR"
+                        )
+                        _log_error(
+                            "[Twitch-Event-Actions] No se pudo borrar la copia local tras verificar Credential Manager: {}".format(error)
+                        )
+                        return credentials
+                _credential_storage_backend = "Administrador de credenciales de Windows (verificado)"
+            return credentials
+        if any(fallback_credentials.values()):
+            try:
+                _write_windows_credentials(fallback_credentials)
+                if _read_windows_credentials() != fallback_credentials:
+                    raise OSError("Credential Manager verification failed")
+                _remove_fallback_credentials(strict=True)
+                _credential_storage_backend = "Administrador de credenciales de Windows (migración verificada)"
+                return fallback_credentials
+            except (OSError, ValueError) as error:
+                _credential_storage_backend = "Archivo local SIN CIFRAR: {}".format(_credential_file_path())
+                _log_error(
+                    "[Twitch-Event-Actions] No se pudo migrar el archivo local a Credential Manager: {}".format(error)
+                )
+            return fallback_credentials
+        _credential_storage_backend = (
+            "Administrador de credenciales inaccesible; no hay credenciales locales"
+            if secure_store_error
+            else "No hay credenciales almacenadas."
+        )
+        return {}
+    fallback_credentials = _read_fallback_credentials()
+    if any(fallback_credentials.values()):
+        _credential_storage_backend = "Archivo local SIN CIFRAR: {}".format(_credential_file_path())
+        return fallback_credentials
+    _credential_storage_backend = "Este sistema no tiene almacén cifrado; no hay archivo local."
+    return {}
 
-def _save_credentials(credentials):
+def _save_credentials(
+    credentials,
+    allow_plaintext_fallback=False,
+    allow_conflicting_fallback=False,
+):
+    global _credential_storage_backend
     normalized = _normalize_credentials(credentials)
     if os.name == "nt":
+        fallback_credentials = (
+            _read_fallback_credentials()
+            if os.path.exists(_credential_file_path())
+            else {}
+        )
+        has_conflicts = any(
+            normalized.get(key)
+            and fallback_credentials.get(key)
+            and normalized[key] != fallback_credentials[key]
+            for key in CREDENTIAL_KEYS
+        )
+        if has_conflicts and not allow_conflicting_fallback:
+            _credential_storage_backend = (
+                "Credential Manager y archivo SIN CIFRAR contienen credenciales distintas; "
+                "revisión necesaria"
+            )
+            raise OSError(
+                "Hay valores distintos en Credential Manager y el archivo local; "
+                "introduce explícitamente las credenciales correctas antes de sobrescribir la copia"
+            )
+        existing_credentials = None
+        try:
+            existing_credentials = _read_windows_credentials()
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
         try:
             _write_windows_credentials(normalized)
-            _remove_fallback_credentials(strict=True)
-            return
+            verified_credentials = _read_windows_credentials()
+            if verified_credentials != normalized:
+                raise OSError("Credential Manager verification failed")
         except (OSError, ValueError) as error:
+            if not allow_plaintext_fallback:
+                _credential_storage_backend = (
+                    "Error en Administrador de credenciales; fallback sin cifrar no autorizado"
+                )
+                raise OSError(
+                    "No se pudo verificar el Administrador de credenciales; "
+                    "activa el fallback sin cifrar solo si aceptas el riesgo"
+                ) from error
+            if (
+                existing_credentials is not None
+                and any(existing_credentials.values())
+                and existing_credentials != normalized
+            ):
+                _credential_storage_backend = (
+                    "Credential Manager contiene otros valores; fallback detenido para evitar credenciales divergentes"
+                )
+                raise OSError(
+                    "Credential Manager contiene credenciales previas diferentes; "
+                    "no se creó una copia de fallback que pudiera quedar eclipsada"
+                ) from error
             _log_fallback_warning(
                 "No se pudo guardar en el Administrador de credenciales de Windows ({}).".format(error)
             )
-    path = _credential_file_path()
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as credential_file:
-        json.dump(normalized, credential_file, ensure_ascii=False)
-    if os.name != "nt":
-        os.chmod(path, 0o600)
-    _log_fallback_warning("Este sistema no dispone de un almacén seguro integrado.")
+        else:
+            _credential_storage_backend = "Administrador de credenciales de Windows (verificado)"
+            _remove_fallback_credentials(strict=True)
+            return _credential_storage_backend
+    elif not allow_plaintext_fallback:
+        _credential_storage_backend = (
+            "Este sistema no ofrece almacén cifrado; fallback sin cifrar no autorizado"
+        )
+        raise OSError(
+            "Este sistema no dispone de almacén cifrado; autoriza el fallback sin cifrar para guardarlas"
+        )
+    try:
+        _write_fallback_credentials(normalized)
+        if _read_fallback_credentials() != normalized:
+            raise OSError("Plaintext credential file verification failed")
+    except (OSError, ValueError):
+        _credential_storage_backend = "No se confirmó el guardado del archivo local sin cifrar"
+        raise
+    _credential_storage_backend = "Archivo local SIN CIFRAR: {}".format(_credential_file_path())
+    _log_fallback_warning("El fallback local está habilitado expresamente.")
+    return _credential_storage_backend
 
 def _clear_credentials():
     if os.name == "nt":
+        _remove_fallback_credentials(strict=True)
         _delete_windows_credentials()
-    _remove_fallback_credentials(strict=True)
+    else:
+        _remove_fallback_credentials(strict=True)
+
+def _plaintext_fallback_allowed(settings):
+    return bool(settings and obs.obs_data_get_bool(settings, "allow_plaintext_fallback"))
 
 def _credentials_from_settings(settings):
     return {key: obs.obs_data_get_string(settings, key) for key in CREDENTIAL_KEYS}
 
 def _set_runtime_credentials(credentials):
-    global client_id, oauth_token, refresh_token
+    global client_id, oauth_token, refresh_token, _credential_validation_status
     client_id = credentials.get("client_id", "")
     oauth_token = credentials.get("oauth_token", "")
     refresh_token = credentials.get("refresh_token", "")
@@ -291,28 +492,76 @@ def _set_runtime_credentials(credentials):
         oauth_token = ""
     if not isinstance(refresh_token, str):
         refresh_token = ""
+    _credential_validation_status = (
+        "Disponibles; todavía sin comprobar."
+        if any((client_id, oauth_token, refresh_token))
+        else "No hay credenciales guardadas."
+    )
+    _update_credential_status()
+
+def _credential_status_text():
+    status_fields = (
+        ("Client ID", client_id),
+        ("Access token", oauth_token),
+        ("Refresh token", refresh_token),
+    )
+    masked_fields = [
+        "{}: {}".format(label, "********" if value else "no guardado")
+        for label, value in status_fields
+    ]
+    details = [
+        " | ".join(masked_fields),
+        "Almacén: {}".format(_credential_storage_backend),
+        _credential_validation_status,
+    ]
+    if _credential_migration_pending:
+        details.append("Quedan credenciales en los ajustes de OBS; migración pendiente.")
+    return " | ".join(details)
+
+def _update_credential_status():
+    if _credential_status_property is not None:
+        obs.obs_property_set_description(
+            _credential_status_property,
+            _credential_status_text(),
+        )
 
 def _clear_credentials_from_settings(settings):
     for key in CREDENTIAL_KEYS:
         obs.obs_data_set_string(settings, key, "")
 
+def _apply_property_settings(properties, settings):
+    global _applying_property_settings
+    if _applying_property_settings:
+        return
+    _applying_property_settings = True
+    try:
+        obs.obs_properties_apply_settings(properties, settings)
+    finally:
+        _applying_property_settings = False
+
 def _persist_runtime_credentials():
+    global _credential_storage_backend, _credential_migration_pending
     credentials = {key: globals()[key] for key in CREDENTIAL_KEYS}
     try:
-        _save_credentials(credentials)
+        backend = _save_credentials(
+            credentials,
+            allow_plaintext_fallback=_plaintext_fallback_allowed(_script_settings),
+        )
         if _script_settings:
             _clear_credentials_from_settings(_script_settings)
+        _credential_storage_backend = backend
+        _credential_migration_pending = False
     except (OSError, ValueError) as error:
         _log_error("[Twitch-Event-Actions] No se pudieron guardar las credenciales renovadas: {}".format(error))
-        if _script_settings:
-            for key, value in credentials.items():
-                obs.obs_data_set_string(_script_settings, key, value)
-            obs.script_log(
-                obs.LOG_INFO,
-                "[Twitch-Event-Actions] [AVISO] Las credenciales renovadas se conservarán temporalmente en OBS.",
-            )
+        _credential_storage_backend = "Token renovado solo en memoria; almacenamiento persistente fallido"
+        obs.script_log(
+            obs.LOG_INFO,
+            "[Twitch-Event-Actions] [AVISO] El token renovado no se persistió; puede dejar de funcionar al cerrar OBS.",
+        )
+        _update_credential_status()
 
 def on_save_credentials_clicked(properties, prop):
+    global _credential_validation_status, _credential_storage_backend, _credential_migration_pending
     settings_credentials = _credentials_from_settings(_script_settings)
     credentials = {
         key: settings_credentials[key] or globals()[key]
@@ -322,25 +571,43 @@ def on_save_credentials_clicked(properties, prop):
         obs.script_log(obs.LOG_WARNING, "[Twitch-Event-Actions] No hay credenciales que guardar.")
         return True
     try:
-        _save_credentials(credentials)
+        backend = _save_credentials(
+            credentials,
+            allow_plaintext_fallback=_plaintext_fallback_allowed(_script_settings),
+            allow_conflicting_fallback=all(settings_credentials.values()),
+        )
     except (OSError, ValueError) as error:
         _log_error("[Twitch-Event-Actions] No se pudieron guardar las credenciales: {}".format(error))
+        _credential_migration_pending = True
+        _credential_validation_status = "No se confirmó el guardado; conserva la copia en OBS."
+        _update_credential_status()
         return True
     _set_runtime_credentials(credentials)
+    _credential_storage_backend = backend
+    _credential_migration_pending = False
     _clear_credentials_from_settings(_script_settings)
-    obs.obs_properties_apply_settings(properties, _script_settings)
+    _credential_validation_status = "Guardadas; todavía sin comprobar."
+    _update_credential_status()
+    _apply_property_settings(properties, _script_settings)
     obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] Credenciales guardadas fuera de los ajustes de OBS.")
     return True
 
 def on_clear_credentials_clicked(properties, prop):
+    global _credential_validation_status, _credential_storage_backend, _credential_migration_pending
     try:
         _clear_credentials()
     except OSError as error:
+        _credential_storage_backend = "No se pudo confirmar el borrado de todas las copias"
+        _update_credential_status()
         _log_error("[Twitch-Event-Actions] No se pudieron borrar las credenciales guardadas: {}".format(error))
         return True
     _set_runtime_credentials({})
+    _credential_storage_backend = "No hay credenciales almacenadas."
+    _credential_migration_pending = False
     _clear_credentials_from_settings(_script_settings)
-    obs.obs_properties_apply_settings(properties, _script_settings)
+    _credential_validation_status = "Credenciales borradas."
+    _update_credential_status()
+    _apply_property_settings(properties, _script_settings)
     obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] Credenciales guardadas borradas.")
     return True
 
@@ -443,21 +710,30 @@ def _apply_active_event_config(settings, event_key):
         obs.obs_data_set_int(settings, "chat_duration", int(config["duration"]))
 
 def _refresh_event_controls(settings):
-    selected_event = obs.obs_data_get_string(settings, "selected_event")
-    is_chat = selected_event == "chat"
-    is_chat_multiline = is_chat and obs.obs_data_get_int(settings, "event_target_type") == 0
-    visible_controls = {
-        "event_message_template": not is_chat,
-        "chat_max_messages": is_chat_multiline,
-        "chat_max_chars": is_chat_multiline,
-    }
-    for key, visible in visible_controls.items():
-        prop = _event_ui_properties.get(key)
-        if prop is not None:
-            obs.obs_property_set_visible(prop, visible)
+    global _refreshing_event_controls
+    if _refreshing_event_controls or _applying_property_settings:
+        return True
+    _refreshing_event_controls = True
+    try:
+        selected_event = obs.obs_data_get_string(settings, "selected_event")
+        is_chat = selected_event == "chat"
+        is_chat_multiline = is_chat and obs.obs_data_get_int(settings, "event_target_type") == 0
+        visible_controls = {
+            "event_message_template": not is_chat,
+            "chat_max_messages": is_chat_multiline,
+            "chat_max_chars": is_chat_multiline,
+        }
+        for key, visible in visible_controls.items():
+            prop = _event_ui_properties.get(key)
+            if prop is not None:
+                obs.obs_property_set_visible(prop, visible)
+    finally:
+        _refreshing_event_controls = False
     return True
 
 def on_event_action_changed(props, prop, settings):
+    if _applying_property_settings or _refreshing_event_controls:
+        return True
     _refresh_event_controls(settings)
     return True
 
@@ -466,6 +742,8 @@ def _persist_event_configs(settings):
 
 def on_event_selection_changed(props, prop, settings):
     global _selected_event_key
+    if _applying_property_settings:
+        return True
     new_event_key = obs.obs_data_get_string(settings, "selected_event")
     if new_event_key not in EVENT_DEFINITION_BY_KEY:
         return False
@@ -474,7 +752,7 @@ def on_event_selection_changed(props, prop, settings):
     _apply_active_event_config(settings, new_event_key)
     _persist_event_configs(settings)
     _refresh_event_controls(settings)
-    obs.obs_properties_apply_settings(props, settings)
+    _apply_property_settings(props, settings)
     return True
 
 def on_export_settings(props, prop):
@@ -506,7 +784,8 @@ def on_export_settings(props, prop):
     return True
 
 def on_import_settings(props, prop):
-    global _event_settings_loaded
+    global _event_settings_loaded, _credential_migration_pending, _credential_storage_backend
+    global _credential_validation_status
     settings_dir = obs.obs_data_get_string(_script_settings, "settings_path")
     if not settings_dir:
         settings_dir = os.path.join(os.path.expanduser("~"), "Desktop")
@@ -519,31 +798,50 @@ def on_import_settings(props, prop):
     try:
         with open(import_path, "r", encoding="utf-8") as f:
             config_data = json.load(f)
+        if not isinstance(config_data, dict):
+            raise ValueError("El archivo de ajustes debe contener un objeto JSON")
         
         target_settings = _script_settings if _script_settings else obs.obs_data_create()
         
         obs.obs_data_set_bool(target_settings, "enabled", config_data.get("enabled", True))
-        imported_credentials = _normalize_credentials({
-            key: config_data.get(key, "")
-            for key in CREDENTIAL_KEYS
-        })
-        if any(imported_credentials.values()):
+        imported_credentials = _credentials_from_legacy_config(config_data)
+        settings_credentials = _credentials_from_settings(target_settings)
+        if any(imported_credentials.values()) or any(settings_credentials.values()):
+            stored_credentials = _load_credentials()
             credentials = {
-                key: imported_credentials[key] or globals()[key]
+                key: (
+                    imported_credentials.get(key)
+                    or stored_credentials.get(key)
+                    or globals().get(key, "")
+                    or settings_credentials.get(key, "")
+                )
                 for key in CREDENTIAL_KEYS
             }
+            _set_runtime_credentials(credentials)
             try:
-                _save_credentials(credentials)
-                _set_runtime_credentials(credentials)
+                backend = _save_credentials(
+                    credentials,
+                    allow_plaintext_fallback=_plaintext_fallback_allowed(target_settings),
+                    allow_conflicting_fallback=all(imported_credentials.get(key) for key in CREDENTIAL_KEYS),
+                )
+                _credential_storage_backend = backend
+                _credential_migration_pending = False
                 _clear_credentials_from_settings(target_settings)
+                obs.script_log(
+                    obs.LOG_INFO,
+                    "[Twitch-Event-Actions] Credenciales importadas y guardadas fuera de los ajustes de OBS.",
+                )
             except (OSError, ValueError) as error:
-                for key, value in imported_credentials.items():
-                    obs.obs_data_set_string(target_settings, key, value)
+                _credential_storage_backend = "No se confirmó almacenamiento de credenciales importadas"
+                _credential_migration_pending = False
+                _credential_validation_status = "Importadas solo en memoria; conserva el JSON de origen."
                 _log_error("[Twitch-Event-Actions] No se pudieron guardar las credenciales importadas: {}".format(error))
                 obs.script_log(
                     obs.LOG_INFO,
-                    "[Twitch-Event-Actions] [AVISO] Las credenciales importadas permanecen temporalmente en ajustes de OBS.",
+                    "[Twitch-Event-Actions] [AVISO] Las credenciales no se copiaron a OBS ni a un almacén; "
+                    "conserva el archivo importado e inténtalo de nuevo.",
                 )
+                _update_credential_status()
         obs.obs_data_set_string(target_settings, "twitch_scopes", config_data.get("twitch_scopes", "channel:manage:broadcast user:read:chat"))
         obs.obs_data_set_string(target_settings, "broadcaster_id", config_data.get("broadcaster_id", ""))
         obs.obs_data_set_string(target_settings, "chat_channel", config_data.get("chat_channel", ""))
@@ -566,7 +864,7 @@ def on_import_settings(props, prop):
         script_update(target_settings)
         
         if props:
-            obs.obs_properties_apply_settings(props, target_settings)
+            _apply_property_settings(props, target_settings)
         
         if not _script_settings:
             obs.obs_data_release(target_settings)
@@ -577,14 +875,15 @@ def on_import_settings(props, prop):
     return True
 
 def script_properties():
-    global _event_ui_properties
+    global _event_ui_properties, _credential_status_property
     props = obs.obs_properties_create()
-    obs.obs_properties_add_bool(props, "enabled", "Activar Script")
+    obs.obs_properties_add_bool(props, "enabled", "Plugin Activo")
+    options_props = obs.obs_properties_create()
     
     # Auth Group
     auth_props = obs.obs_properties_create()
     obs.obs_properties_add_button(auth_props, "generate_token", "🌐 Abrir URL de Autorización Twitch", on_generate_token)
-    obs.obs_properties_add_button(auth_props, "refresh_token_btn", "🔍 Comprobar Token", on_refresh_token)
+    obs.obs_properties_add_button(auth_props, "refresh_token_btn", "🔍 Comprobar Token", on_check_token)
     obs.obs_properties_add_button(auth_props, "force_refresh_button", "🔄 Forzar Refresco de Token", on_refresh_token)
     obs.obs_properties_add_button(auth_props, "get_id_button", "🔍 Detectar ID y Canal", on_get_broadcaster_id)
 
@@ -596,14 +895,32 @@ def script_properties():
     obs.obs_properties_add_text(auth_props, "refresh_token", "Twitch Refresh Token", obs.OBS_TEXT_PASSWORD)
     obs.obs_properties_add_text(
         auth_props,
+        "credential_status",
+        _credential_status_text(),
+        obs.OBS_TEXT_INFO,
+    )
+    _credential_status_property = obs.obs_properties_get(auth_props, "credential_status")
+    obs.obs_properties_add_text(
+        auth_props,
         "credentials_help",
-        "Introduce credenciales nuevas y pulsa Guardar para retirarlas de los ajustes de OBS. Vacío mantiene las credenciales guardadas.",
+        "Introduce credenciales nuevas y pulsa Guardar. Las guardadas se indican con asteriscos debajo; deja los campos vacíos para conservarlas. El refresco actual envía el refresh token a TwitchTokenGenerator.com.",
+        obs.OBS_TEXT_INFO,
+    )
+    obs.obs_properties_add_bool(
+        auth_props,
+        "allow_plaintext_fallback",
+        "Permitir fallback local SIN CIFRAR si no hay almacén seguro",
+    )
+    obs.obs_properties_add_text(
+        auth_props,
+        "plaintext_fallback_help",
+        "Desactivado por defecto. Si lo activas, las credenciales se guardarán en un archivo JSON en texto plano con aviso visible.",
         obs.OBS_TEXT_INFO,
     )
     obs.obs_properties_add_button(auth_props, "save_credentials_button", "🔒 Guardar credenciales", on_save_credentials_clicked)
     obs.obs_properties_add_button(auth_props, "clear_credentials_button", "🗑 Borrar credenciales guardadas", on_clear_credentials_clicked)
     obs.obs_properties_add_text(auth_props, "twitch_scopes", "Scopes", obs.OBS_TEXT_DEFAULT)
-    obs.obs_properties_add_group(props, "auth_group", "Configuración Twitch", obs.OBS_GROUP_NORMAL, auth_props)
+    obs.obs_properties_add_group(options_props, "auth_group", "Configuración Twitch", obs.OBS_GROUP_NORMAL, auth_props)
 
     # Chat and EventSub share a single compact editor; each event keeps its own settings.
     event_props = obs.obs_properties_create()
@@ -642,7 +959,7 @@ def script_properties():
         obs.OBS_TEXT_DEFAULT
     )
     obs.obs_properties_add_button(event_props, "test_event_button", "▶ Probar", on_test_event)
-    obs.obs_properties_add_group(props, "event_actions", "⚡ Eventos Twitch", obs.OBS_GROUP_NORMAL, event_props)
+    obs.obs_properties_add_group(options_props, "event_actions", "⚡ Eventos Twitch", obs.OBS_GROUP_NORMAL, event_props)
     _event_ui_properties = {
         "event_message_template": obs.obs_properties_get(event_props, "event_message_template"),
         "chat_max_messages": obs.obs_properties_get(event_props, "chat_max_messages"),
@@ -660,12 +977,14 @@ def script_properties():
     )
     obs.obs_properties_add_button(mng_props, "export_btn", "💾 Guardar Ajustes", on_export_settings)
     obs.obs_properties_add_button(mng_props, "import_btn", "📂 Cargar Ajustes", on_import_settings)
-    obs.obs_properties_add_group(props, "settings_mng", "Gestión de ajustes", obs.OBS_GROUP_NORMAL, mng_props)
+    obs.obs_properties_add_group(options_props, "settings_mng", "Gestión de ajustes", obs.OBS_GROUP_NORMAL, mng_props)
+    obs.obs_properties_add_group(props, "plugin_options", "Opciones del plugin", obs.OBS_GROUP_NORMAL, options_props)
 
     return props
 
 def script_defaults(settings):
     obs.obs_data_set_default_bool(settings, "enabled", True)
+    obs.obs_data_set_default_bool(settings, "allow_plaintext_fallback", False)
     obs.obs_data_set_default_string(settings, "client_id", "")
     obs.obs_data_set_default_string(settings, "oauth_token", "")
     obs.obs_data_set_default_string(settings, "refresh_token", "")
@@ -692,7 +1011,7 @@ def script_update(settings):
     global enabled, _script_settings, client_id, oauth_token, refresh_token, twitch_scopes, broadcaster_id, chat_channel
     global chat_enabled, chat_target_type, chat_target_source, chat_max_messages, chat_max_chars, chat_duration
     global _event_configs, _event_settings_loaded, _selected_event_key
-    global _credentials_loaded
+    global _credentials_loaded, _credential_migration_pending, _credential_storage_backend
 
     _script_settings = settings
     enabled = obs.obs_data_get_bool(settings, "enabled")
@@ -705,17 +1024,33 @@ def script_update(settings):
         }
         _set_runtime_credentials(credentials)
         if any(settings_credentials.values()):
+            _credential_migration_pending = True
             try:
-                _save_credentials(credentials)
+                backend = _save_credentials(
+                    credentials,
+                    allow_plaintext_fallback=_plaintext_fallback_allowed(settings),
+                )
                 _clear_credentials_from_settings(settings)
+                _credential_storage_backend = backend
+                _credential_migration_pending = False
                 obs.script_log(
                     obs.LOG_INFO,
-                    "[Twitch-Event-Actions] Credenciales migradas fuera de los ajustes de OBS.",
+                    "[Twitch-Event-Actions] Credenciales migradas y almacenamiento verificado: {}.".format(
+                        backend
+                    ),
                 )
             except (OSError, ValueError) as error:
+                _credential_storage_backend = "Pendiente; credenciales siguen en ajustes de OBS"
                 _log_error("[Twitch-Event-Actions] No se pudieron migrar las credenciales: {}".format(error))
+                obs.script_log(
+                    obs.LOG_INFO,
+                    "[Twitch-Event-Actions] [AVISO] Las credenciales siguen en los ajustes de OBS en texto plano; "
+                    "activa el fallback sin cifrar o corrige el almacén seguro para migrarlas.",
+                )
+            _update_credential_status()
         elif any(stored_credentials.values()):
             _clear_credentials_from_settings(settings)
+            _credential_migration_pending = False
         _credentials_loaded = True
     else:
         current_credentials = {
@@ -772,9 +1107,11 @@ def script_update(settings):
     _restart_eventsub_listener()
 
 def on_refresh_token(properties, property):
-    global oauth_token, refresh_token, client_id
+    global oauth_token, refresh_token, client_id, _credential_validation_status
     obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] Iniciando refresco de token...")
     if not refresh_token:
+        _credential_validation_status = "No hay refresh token para comprobar."
+        _update_credential_status()
         obs.script_log(obs.LOG_WARNING, "[Twitch-Event-Actions] No hay refresh token configurado.")
         return True
     url = "https://twitchtokengenerator.com/api/refresh/{}".format(refresh_token.strip())
@@ -788,13 +1125,78 @@ def on_refresh_token(properties, property):
             if _script_settings:
                 obs.obs_data_set_int(_script_settings, "last_refresh_timestamp", int(time.time()))
             _persist_runtime_credentials()
+            _credential_validation_status = "Token renovado; el access token aún no se ha validado."
+            _update_credential_status()
             obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] Token refrescado con éxito.")
             _restart_irc_listener()
             _restart_eventsub_listener()
         else:
+            _credential_validation_status = "No se pudo comprobar el refresh token; revisa el log."
+            _update_credential_status()
             _log_error(f"[Twitch-Event-Actions] Error al refrescar: {data.get('message', 'Desconocido')}")
     except Exception as e:
+        _credential_validation_status = "Falló la comprobación del refresh token; revisa el log."
+        _update_credential_status()
         _log_error(f"[Twitch-Event-Actions] Error de conexión al refrescar: {e}")
+    return True
+
+def on_check_token(properties, property):
+    global _credential_validation_status
+    if not oauth_token:
+        _credential_validation_status = "No hay access token para comprobar."
+        _update_credential_status()
+        obs.script_log(
+            obs.LOG_INFO,
+            "[Twitch-Event-Actions] Comprobar token: {}".format(_credential_validation_status),
+        )
+        return True
+
+    _credential_validation_status = "Comprobando access token con Twitch..."
+    _update_credential_status()
+    request = urllib.request.Request(
+        "https://id.twitch.tv/oauth2/validate",
+        headers={"Authorization": "OAuth {}".format(oauth_token.replace("oauth:", "").strip())},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            validation = json.loads(response.read().decode("utf-8"))
+        if not isinstance(validation, dict):
+            raise ValueError("Twitch devolvió una respuesta de validación no válida.")
+        token_client_id = validation.get("client_id")
+        if client_id and token_client_id and token_client_id != client_id:
+            _credential_validation_status = "Access token válido, pero pertenece a otro Client ID."
+        else:
+            expiry = validation.get("expires_in")
+            if isinstance(expiry, int):
+                _credential_validation_status = "Access token válido; expira en {} h {} min.".format(
+                    expiry // 3600, (expiry % 3600) // 60
+                )
+            else:
+                _credential_validation_status = "Access token válido según Twitch."
+        _update_credential_status()
+        obs.script_log(
+            obs.LOG_INFO,
+            "[Twitch-Event-Actions] Comprobar token: {}".format(_credential_validation_status),
+        )
+    except urllib.error.HTTPError as error:
+        if error.code == 401:
+            _credential_validation_status = "Access token rechazado por Twitch; prueba a renovarlo."
+        else:
+            _credential_validation_status = "No se pudo validar el access token (HTTP {}).".format(error.code)
+        _update_credential_status()
+        _log_error("[Twitch-Event-Actions] Error validando access token: {}".format(error))
+        obs.script_log(
+            obs.LOG_INFO,
+            "[Twitch-Event-Actions] Comprobar token: {}".format(_credential_validation_status),
+        )
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        _credential_validation_status = "Falló la validación del access token; revisa el log."
+        _update_credential_status()
+        _log_error("[Twitch-Event-Actions] Error de conexión validando access token: {}".format(error))
+        obs.script_log(
+            obs.LOG_INFO,
+            "[Twitch-Event-Actions] Comprobar token: {}".format(_credential_validation_status),
+        )
     return True
 
 def _required_event_scopes(event_key):
@@ -837,7 +1239,7 @@ def on_generate_token(properties, property):
     return True
 
 def on_get_broadcaster_id(properties, property):
-    global broadcaster_id, chat_channel
+    global broadcaster_id, chat_channel, _credential_validation_status
     if not client_id or not oauth_token: return True
     request = urllib.request.Request(
         "https://api.twitch.tv/helix/users",
@@ -854,6 +1256,8 @@ def on_get_broadcaster_id(properties, property):
         if users:
             broadcaster_id = users[0].get("id", "")
             chat_channel = users[0].get("login", "")
+            _credential_validation_status = "Access token aceptado por Twitch."
+            _update_credential_status()
             obs.script_log(obs.LOG_INFO, f"[Twitch-Event-Actions] ✓ ID detectado: {broadcaster_id} | Canal: {chat_channel}")
             if _script_settings:
                 obs.obs_data_set_string(_script_settings, "broadcaster_id", broadcaster_id)
@@ -862,7 +1266,11 @@ def on_get_broadcaster_id(properties, property):
             _restart_eventsub_listener()
         else:
             obs.script_log(obs.LOG_WARNING, "[Twitch-Event-Actions] ⚠️ No se pudieron obtener los datos de usuario.")
+            _credential_validation_status = "Twitch no devolvió los datos del canal."
+            _update_credential_status()
     except Exception as e:
+        _credential_validation_status = "No se pudo validar el access token; revisa el log."
+        _update_credential_status()
         _log_error(f"[Twitch-Event-Actions] ❌ Error detectando ID: {e}")
     return True
 
@@ -981,20 +1389,25 @@ def _eventsub_create_subscription(event_key, session_id, client, token, broadcas
         "{} {}".format(chr(66) + "earer", token.replace("oauth:", "").strip()),
     )
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with urllib.request.urlopen(request, timeout=5) as response:
             response.read()
-        obs.script_log(obs.LOG_INFO, "[Twitch-Event-Actions] Suscripción EventSub activa: {}".format(definition[1]))
+        _queue_background_log(
+            obs.LOG_INFO,
+            "[Twitch-Event-Actions] Suscripción EventSub activa: {}".format(definition[1]),
+        )
         return True
     except urllib.error.HTTPError as error:
         details = error.read().decode("utf-8", errors="replace")
-        _log_error(
-            "[Twitch-Event-Actions] Twitch rechazó la suscripción '{}': HTTP {} {}".format(
+        _queue_background_log(
+            obs.LOG_INFO,
+            "[ERROR] [Twitch-Event-Actions] Twitch rechazó la suscripción '{}': HTTP {} {}".format(
                 definition[1], error.code, details
             ),
         )
     except (urllib.error.URLError, OSError, ValueError) as error:
-        _log_error(
-            "[Twitch-Event-Actions] No se pudo crear la suscripción '{}': {}".format(definition[1], error),
+        _queue_background_log(
+            obs.LOG_INFO,
+            "[ERROR] [Twitch-Event-Actions] No se pudo crear la suscripción '{}': {}".format(definition[1], error),
         )
     return False
 
@@ -1006,10 +1419,10 @@ def _websocket_connect(url):
     path = parsed.path or "/"
     if parsed.query:
         path += "?" + parsed.query
-    raw_socket = socket.create_connection((parsed.hostname, port), timeout=20)
+    raw_socket = socket.create_connection((parsed.hostname, port), timeout=5)
     try:
         ws_socket = ssl.create_default_context().wrap_socket(raw_socket, server_hostname=parsed.hostname)
-        ws_socket.settimeout(20)
+        ws_socket.settimeout(5)
         key = base64.b64encode(os.urandom(16)).decode("ascii")
         request = (
             "GET {} HTTP/1.1\r\n"
@@ -1041,7 +1454,7 @@ def _websocket_connect(url):
                 response_headers[name.strip().lower()] = value.strip()
         if response_headers.get("sec-websocket-accept") != expected_accept:
             raise ConnectionError("Respuesta de handshake WebSocket inválida.")
-        ws_socket.settimeout(35.0)
+        ws_socket.settimeout(5.0)
         return ws_socket
     except Exception:
         raw_socket.close()
@@ -1129,14 +1542,14 @@ def _eventsub_worker_loop(stop_event, event_keys, client, token, broadcaster):
                 keepalive_seconds = welcome.get("payload", {}).get("session", {}).get("keepalive_timeout_seconds") or 30
                 if not session_id:
                     raise ConnectionError("El mensaje de bienvenida de EventSub no contiene session_id.")
-                ws_socket.settimeout(keepalive_seconds + 5)
+                ws_socket.settimeout(5.0)
                 if not subscriptions_created:
                     for index, event_key in enumerate(event_keys):
                         if stop_event.is_set():
                             break
                         _eventsub_create_subscription(event_key, session_id, client, token, broadcaster)
                         if index < len(event_keys) - 1:
-                            time.sleep(0.35)
+                            stop_event.wait(0.35)
                     subscriptions_created = True
                 last_message_at = time.time()
                 while not stop_event.is_set():
@@ -1164,7 +1577,7 @@ def _eventsub_worker_loop(stop_event, event_keys, client, token, broadcaster):
                         ws_socket = replacement_socket
                         _eventsub_socket = ws_socket
                         keepalive_seconds = replacement_welcome.get("payload", {}).get("session", {}).get("keepalive_timeout_seconds") or keepalive_seconds
-                        ws_socket.settimeout(keepalive_seconds + 5)
+                        ws_socket.settimeout(5.0)
                     elif message_type == "notification":
                         event_type = envelope.get("metadata", {}).get("subscription_type")
                         event_data = envelope.get("payload", {}).get("event", {})
@@ -1176,7 +1589,7 @@ def _eventsub_worker_loop(stop_event, event_keys, client, token, broadcaster):
                             _queue_event_payload(event_key, event_data)
                     elif message_type == "revocation":
                         subscription = envelope.get("payload", {}).get("subscription", {})
-                        obs.script_log(
+                        _queue_background_log(
                             obs.LOG_WARNING,
                             "[Twitch-Event-Actions] Twitch revocó la suscripción EventSub: {}".format(
                                 subscription.get("type", "desconocida")
@@ -1185,7 +1598,10 @@ def _eventsub_worker_loop(stop_event, event_keys, client, token, broadcaster):
             except (OSError, ValueError, TimeoutError, ConnectionError) as error:
                 subscriptions_created = False
                 if not stop_event.is_set():
-                    obs.script_log(obs.LOG_WARNING, "[Twitch-Event-Actions] EventSub desconectado: {}".format(error))
+                    _queue_background_log(
+                        obs.LOG_WARNING,
+                        "[Twitch-Event-Actions] EventSub desconectado: {}".format(error),
+                    )
                     stop_event.wait(5)
             finally:
                 if ws_socket:
@@ -1212,7 +1628,6 @@ def _restart_eventsub_listener():
     signature = (enabled, client_id, oauth_token, broadcaster_id, event_keys)
     if signature == _eventsub_signature:
         return
-    _eventsub_signature = signature
     _eventsub_stop_event.set()
     if _eventsub_socket:
         try:
@@ -1224,9 +1639,18 @@ def _restart_eventsub_listener():
         except OSError:
             pass
     if _eventsub_thread and _eventsub_thread.is_alive():
-        _eventsub_thread.join(timeout=2.0)
+        _eventsub_thread.join(timeout=6.0)
+        if _eventsub_thread.is_alive():
+            _eventsub_signature = None
+            obs.script_log(
+                obs.LOG_WARNING,
+                "[Twitch-Event-Actions] EventSub sigue cerrándose; no se iniciará un segundo hilo.",
+            )
+            return
     _eventsub_thread = None
+    _eventsub_socket = None
     _eventsub_stop_event = threading.Event()
+    _eventsub_signature = signature
     if not enabled or not event_keys:
         return
     if not client_id or not oauth_token or not broadcaster_id:
@@ -1334,12 +1758,16 @@ def on_test_event(props, prop):
     return True
 
 def _process_chat_queue():
-    global _chat_queue
+    global _chat_queue, _background_log_queue
     # Detach a batch while holding the lock; OBS actions stay on this timer's
     # (main) thread and IRC can enqueue the next batch concurrently.
     with _chat_queue_lock:
         queued_messages = _chat_queue
         _chat_queue = []
+        queued_logs = _background_log_queue
+        _background_log_queue = []
+    for level, message in queued_logs:
+        obs.script_log(level, message)
     chat_config = _event_configs.get("chat", {})
     for payload in queued_messages:
         if not isinstance(chat_config, dict) or not chat_config.get("enabled"):
@@ -1366,7 +1794,16 @@ def _restart_irc_listener():
             _irc_socket.close()
         except OSError:
             pass
-    if _irc_thread: _irc_thread.join(timeout=1.0)
+    if _irc_thread and _irc_thread.is_alive():
+        _irc_thread.join(timeout=6.0)
+        if _irc_thread.is_alive():
+            obs.script_log(
+                obs.LOG_WARNING,
+                "[Twitch-Event-Actions] El listener IRC sigue cerrándose; no se iniciará un segundo hilo.",
+            )
+            return
+    _irc_thread = None
+    _irc_socket = None
     _irc_stop_event = threading.Event()
     chat_config = _event_configs.get("chat", {})
     if (
@@ -1398,7 +1835,10 @@ def _irc_worker_loop(stop_event):
             
             buffer = ""
             while not stop_event.is_set():
-                data = _irc_socket.recv(4096).decode("utf-8", errors="ignore")
+                try:
+                    data = _irc_socket.recv(4096).decode("utf-8", errors="ignore")
+                except socket.timeout:
+                    continue
                 if not data: break
                 buffer += data
                 lines = buffer.split("\r\n")
@@ -1407,15 +1847,20 @@ def _irc_worker_loop(stop_event):
                     if line.startswith("PING"): 
                         try:
                             _irc_socket.sendall(line.replace("PING", "PONG").encode() + b"\r\n")
-                        except:
-                            pass
+                        except OSError:
+                            break
                         continue
                     match = re.match(r"^:([^!]+)![^ ]+ PRIVMSG #[^ ]+ :(.+)$", line)
                     if match:
                         with _chat_queue_lock:
                             _chat_queue.append(f"{match.group(1)}: {match.group(2)}")
-        except: 
-            time.sleep(5)
+        except (OSError, ValueError) as error:
+            if not stop_event.is_set():
+                _queue_background_log(
+                    obs.LOG_WARNING,
+                    "[Twitch-Event-Actions] Listener IRC desconectado: {}".format(error),
+                )
+                stop_event.wait(5)
 
 def script_load(settings):
     global _event_settings_loaded, _credentials_loaded
@@ -1450,6 +1895,16 @@ def script_unload():
             pass
             
     if _irc_thread and _irc_thread.is_alive():
-        _irc_thread.join(timeout=1.0)
+        _irc_thread.join(timeout=6.0)
+        if _irc_thread.is_alive():
+            obs.script_log(
+                obs.LOG_WARNING,
+                "[Twitch-Event-Actions] El hilo IRC no terminó dentro del tiempo de cierre.",
+            )
     if _eventsub_thread and _eventsub_thread.is_alive():
-        _eventsub_thread.join(timeout=2.0)
+        _eventsub_thread.join(timeout=6.0)
+        if _eventsub_thread.is_alive():
+            obs.script_log(
+                obs.LOG_WARNING,
+                "[Twitch-Event-Actions] El hilo EventSub no terminó dentro del tiempo de cierre.",
+            )

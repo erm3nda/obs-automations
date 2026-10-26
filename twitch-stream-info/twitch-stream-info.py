@@ -4,6 +4,7 @@ import urllib.parse
 import urllib.error
 import json
 import threading
+import queue
 import re
 import webbrowser
 import os
@@ -33,15 +34,34 @@ _script_settings     = None
 is_first_load        = True
 _is_importing_settings = False
 _fallback_warning_logged = False
+_credential_status_property = None
+_credential_validation_status = "Todavía no se han comprobado."
+_credential_backend_status = "No hay credenciales guardadas."
+_credential_migration_pending = False
+_credential_conflict_detected = False
+_main_thread_actions = queue.Queue()
+_http_stop_event = threading.Event()
+_http_workers = set()
+_http_workers_lock = threading.Lock()
 
 CREDENTIAL_TARGET = "Twitch-Stream-Info"
 CREDENTIAL_FILE = ".obs-twitch-stream-info-credentials.json"
+CREDENTIALS_PENDING_SETTING = "_pending_twitch_credentials_json"
 CREDENTIAL_KEYS = (
     "twitch_client_id",
     "twitch_client_secret",
     "twitch_oauth_token",
     "twitch_refresh_token",
 )
+_credential_presence = {key: False for key in CREDENTIAL_KEYS}
+
+
+class CredentialPersistenceError(Exception):
+    pass
+
+
+class CredentialSourceCleanupError(CredentialPersistenceError):
+    pass
 
 
 class _Credential(ctypes.Structure):
@@ -66,15 +86,16 @@ def _credential_file_path():
 
 
 def _log_fallback_warning(reason):
-    global _fallback_warning_logged
-    if _fallback_warning_logged:
-        return
+    platform_warning = (
+        " En Windows, el acceso depende de las ACL del perfil de usuario; OBS no cifra el archivo."
+        if os.name == "nt"
+        else " En Unix, el archivo se restringe a permisos 0600."
+    )
     obs.script_log(
         obs.LOG_INFO,
-        f"[{PLUGIN_NAME}] [AVISO] {reason} Las credenciales se guardarán sin cifrar en "
-        f"'{_credential_file_path()}'. Protege ese archivo y no lo compartas."
+        f"[{PLUGIN_NAME}] [AVISO] {reason} El archivo local es SIN CIFRAR: "
+        f"'{_credential_file_path()}'. Protege ese archivo y no lo compartas.{platform_warning}"
     )
-    _fallback_warning_logged = True
 
 
 def _safe_error(error, credentials=None):
@@ -91,13 +112,124 @@ def _safe_error(error, credentials=None):
             urllib.parse.quote(secret, safe=""),
             urllib.parse.quote_plus(secret),
         }
+        if secret.lower().startswith("oauth:"):
+            token_without_prefix = secret[6:]
+            variants.update(
+                (
+                    token_without_prefix,
+                    urllib.parse.quote(token_without_prefix, safe=""),
+                    urllib.parse.quote_plus(token_without_prefix),
+                )
+            )
         for variant in sorted(variants, key=len, reverse=True):
             if variant:
                 message = message.replace(variant, "[REDACTED]")
     return message
 
 
-def _read_windows_credentials():
+def _oauth_authorization_header(token):
+    normalized = token.strip()
+    if normalized.lower().startswith("oauth:"):
+        normalized = normalized[6:]
+    return "OAuth " + normalized
+
+
+def _credential_status_text():
+    masked_fields = [
+        "{}: {}".format(
+            label,
+            "********" if value or _credential_presence.get(key, False) else "no guardado",
+        )
+        for (key, label, value) in (
+            ("twitch_client_id", "Client ID", twitch_client_id),
+            ("twitch_client_secret", "Client Secret", twitch_client_secret),
+            ("twitch_oauth_token", "Access token", twitch_oauth_token),
+            ("twitch_refresh_token", "Refresh token", twitch_refresh_token),
+        )
+    ]
+    return "{} | Backend: {} | Validación: {}".format(
+        " | ".join(masked_fields),
+        _credential_backend_status,
+        _credential_validation_status,
+    ) + (
+        " | Migración pendiente"
+        if _credential_migration_pending else
+        " | Migración al día"
+    )
+
+
+def _update_credential_status():
+    if _credential_status_property is not None:
+        obs.obs_property_set_description(
+            _credential_status_property,
+            _credential_status_text(),
+        )
+
+
+def _queue_main_thread_action(action, value=None):
+    _main_thread_actions.put((action, value))
+
+
+def _process_main_thread_actions():
+    global _credential_backend_status, _credential_validation_status, _credential_migration_pending
+    while True:
+        try:
+            action, value = _main_thread_actions.get_nowait()
+        except queue.Empty:
+            break
+
+        if action == "log":
+            level, message = value
+            obs.script_log(level, message)
+        elif action == "persist_credentials":
+            try:
+                backend = _save_credentials(
+                    value,
+                    bool(_script_settings and obs.obs_data_get_bool(_script_settings, "allow_plaintext_fallback")),
+                )
+                if _script_settings:
+                    _clear_credentials_from_settings(_script_settings)
+                _credential_backend_status = backend
+                _credential_migration_pending = False
+                _credential_validation_status = (
+                    "Token renovado y persistido; access token todavía sin validar."
+                )
+            except CredentialSourceCleanupError as error:
+                _credential_migration_pending = True
+                _credential_backend_status = (
+                    _credential_backend_status + "; destino verificado, pero la limpieza de una copia anterior falló."
+                )
+                _credential_validation_status = "Token renovado y persistido; limpieza parcial de credenciales."
+                obs.script_log(
+                    obs.LOG_INFO,
+                    f"[{PLUGIN_NAME}] [ERROR] Token renovado y destino verificado, pero no se limpió una copia anterior: "
+                    f"{_safe_error(error, value)}"
+                )
+            except (OSError, ValueError, CredentialPersistenceError) as error:
+                _credential_migration_pending = True
+                _credential_presence.update({key: bool(item) for key, item in value.items()})
+                _credential_backend_status = (
+                    _credential_backend_status
+                    + "; los tokens nuevos solo viven en memoria y podrían perderse al cerrar."
+                )
+                _credential_validation_status = "Token renovado, pero la persistencia falló."
+                obs.script_log(
+                    obs.LOG_INFO,
+                    f"[{PLUGIN_NAME}] [ERROR] No se pudieron persistir las credenciales renovadas: "
+                    f"{_safe_error(error, value)}. Los tokens nuevos solo viven en memoria y podrían perderse al cerrar."
+                )
+            _update_credential_status()
+        elif action == "refresh_timestamp" and _script_settings:
+            obs.obs_data_set_int(_script_settings, "last_refresh_timestamp", value)
+        elif action == "credential_status":
+            _update_credential_status()
+
+
+def _queue_obs_log(level, message):
+    _queue_main_thread_action("log", (level, _safe_error(message)))
+
+
+def _read_windows_credentials(target=CREDENTIAL_TARGET):
     advapi32 = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
     advapi32.CredReadW.argtypes = [
         wintypes.LPCWSTR,
@@ -110,7 +242,7 @@ def _read_windows_credentials():
     advapi32.CredFree.restype = None
 
     credential = ctypes.POINTER(_Credential)()
-    if not advapi32.CredReadW(CREDENTIAL_TARGET, 1, 0, ctypes.byref(credential)):
+    if not advapi32.CredReadW(target, 1, 0, ctypes.byref(credential)):
         error_code = ctypes.get_last_error()
         if error_code == 1168:
             return None
@@ -133,7 +265,7 @@ def _read_windows_credentials():
         advapi32.CredFree(credential)
 
 
-def _write_windows_credentials(credentials):
+def _write_windows_credentials(credentials, target=CREDENTIAL_TARGET):
     advapi32 = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
     advapi32.CredWriteW.argtypes = [ctypes.POINTER(_Credential), wintypes.DWORD]
     advapi32.CredWriteW.restype = wintypes.BOOL
@@ -144,7 +276,7 @@ def _write_windows_credentials(credentials):
     blob_buffer = ctypes.create_string_buffer(blob)
     credential = _Credential()
     credential.Type = 1
-    credential.TargetName = CREDENTIAL_TARGET
+    credential.TargetName = target
     credential.CredentialBlobSize = len(blob)
     credential.CredentialBlob = ctypes.cast(
         blob_buffer, ctypes.POINTER(ctypes.c_ubyte)
@@ -156,67 +288,70 @@ def _write_windows_credentials(credentials):
         raise OSError(error_code, "CredWriteW failed")
 
 
-def _delete_windows_credentials():
+def _delete_windows_credentials(target=CREDENTIAL_TARGET):
     advapi32 = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
     advapi32.CredDeleteW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD]
     advapi32.CredDeleteW.restype = wintypes.BOOL
-    if not advapi32.CredDeleteW(CREDENTIAL_TARGET, 1, 0):
+    if not advapi32.CredDeleteW(target, 1, 0):
         error_code = ctypes.get_last_error()
         if error_code != 1168:
             raise OSError(error_code, "CredDeleteW failed")
+
+
+def _normalize_credentials(credentials):
+    return {
+        key: credentials.get(key, "") if isinstance(credentials.get(key, ""), str) else ""
+        for key in CREDENTIAL_KEYS
+    }
+
+
+def _credential_source_conflicts(windows_credentials, fallback_credentials):
+    return tuple(
+        key
+        for key in CREDENTIAL_KEYS
+        if windows_credentials.get(key)
+        and fallback_credentials.get(key)
+        and windows_credentials[key] != fallback_credentials[key]
+    )
 
 
 def _read_fallback_credentials():
     path = _credential_file_path()
     if not os.path.exists(path):
         return {}
-    _log_fallback_warning("El sistema de credenciales seguro no está disponible.")
-    try:
-        if os.name != "nt":
-            os.chmod(path, 0o600)
-        with open(path, "r", encoding="utf-8") as credential_file:
-            stored = json.load(credential_file)
-        if not isinstance(stored, dict):
-            raise ValueError("Credential file must contain a JSON object")
-        return {
-            key: value if isinstance(value, str) else ""
-            for key, value in stored.items()
-            if key in CREDENTIAL_KEYS
-        }
-    except (OSError, ValueError, json.JSONDecodeError) as error:
-        obs.script_log(
-            obs.LOG_INFO,
-            f"[{PLUGIN_NAME}] [ERROR] No se pudieron leer las credenciales locales: {_safe_error(error)}"
-        )
-        return {}
+    if os.name != "nt":
+        os.chmod(path, 0o600)
+    with open(path, "r", encoding="utf-8") as credential_file:
+        stored = json.load(credential_file)
+    if not isinstance(stored, dict):
+        raise ValueError("Credential file must contain a JSON object")
+    return _normalize_credentials(stored)
 
 
 def _write_fallback_credentials(credentials):
     path = _credential_file_path()
     temp_path = None
+    descriptor = None
     try:
         descriptor, temp_path = tempfile.mkstemp(
             prefix=CREDENTIAL_FILE + ".",
             suffix=".tmp",
-            dir=os.path.dirname(path)
+            dir=os.path.dirname(path),
         )
         if os.name != "nt":
             os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as credential_file:
+            descriptor = None
             json.dump(credentials, credential_file, ensure_ascii=False)
             credential_file.flush()
             os.fsync(credential_file.fileno())
         os.replace(temp_path, path)
-    except OSError as error:
-        obs.script_log(
-            obs.LOG_INFO,
-            f"[{PLUGIN_NAME}] [ERROR] No se pudieron guardar las credenciales locales: {_safe_error(error)}"
-        )
-        raise
+        temp_path = None
     finally:
+        if descriptor is not None:
+            os.close(descriptor)
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
-    _log_fallback_warning("Este sistema no dispone de un almacén seguro integrado.")
 
 
 def _remove_fallback_credentials():
@@ -224,69 +359,259 @@ def _remove_fallback_credentials():
         os.remove(_credential_file_path())
     except FileNotFoundError:
         pass
-    except OSError as error:
-        obs.script_log(
-            obs.LOG_INFO,
-            f"[{PLUGIN_NAME}] [AVISO] No se pudo borrar el archivo de fallback: {_safe_error(error)}"
+
+
+def _read_credential_sources():
+    windows_credentials = {}
+    fallback_credentials = {}
+    windows_error = None
+    fallback_error = None
+    if os.name == "nt":
+        try:
+            windows_credentials = _normalize_credentials(_read_windows_credentials() or {})
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            windows_error = error
+    try:
+        fallback_credentials = _read_fallback_credentials()
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        fallback_error = error
+    return windows_credentials, fallback_credentials, windows_error, fallback_error
+
+
+def _set_backend_status_from_sources(windows_credentials, fallback_credentials, errors=()):
+    global _credential_backend_status
+    if windows_credentials and not errors:
+        _credential_backend_status = "Credential Manager verificado"
+        if fallback_credentials:
+            _credential_backend_status += (
+                f"; archivo local SIN CIFRAR también presente: {_credential_file_path()}"
+            )
+            _log_fallback_warning("Se detectó un almacén local de credenciales.")
+    elif errors:
+        _credential_backend_status = "Fallo al leer el almacén: {}".format(
+            "; ".join(_safe_error(error) for error in errors)
         )
-        raise
+        if fallback_credentials:
+            _credential_backend_status += (
+                f"; archivo local SIN CIFRAR: {_credential_file_path()}"
+            )
+            _log_fallback_warning("Se detectó un almacén local de credenciales.")
+    elif fallback_credentials:
+        _credential_backend_status = f"Archivo local SIN CIFRAR: {_credential_file_path()}"
+        _log_fallback_warning("Se detectó un almacén local de credenciales.")
+    else:
+        _credential_backend_status = "No hay credenciales guardadas."
+    _update_credential_status()
 
 
 def _load_credentials():
-    if os.name == "nt":
-        try:
-            credentials = _read_windows_credentials()
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            _log_fallback_warning(
-                f"No se pudo acceder al Administrador de credenciales de Windows ({_safe_error(error)})."
-            )
-        else:
-            if credentials is not None:
-                try:
-                    _remove_fallback_credentials()
-                except OSError:
-                    pass
-                return credentials
-    return _read_fallback_credentials()
-
-
-def _save_credentials(credentials):
-    normalized = {
-        key: credentials.get(key, "") if isinstance(credentials.get(key, ""), str) else ""
+    global _credential_conflict_detected, _credential_migration_pending, _credential_backend_status
+    windows_credentials, fallback_credentials, windows_error, fallback_error = _read_credential_sources()
+    conflicts = _credential_source_conflicts(windows_credentials, fallback_credentials)
+    if conflicts:
+        _credential_conflict_detected = True
+        _credential_migration_pending = True
+        _set_runtime_credentials({})
+        _credential_validation_status = "Validación detenida hasta resolver el conflicto entre almacenes."
+        _credential_backend_status = (
+            f"Conflicto entre Credential Manager y archivo local SIN CIFRAR ({_credential_file_path()}); "
+            "se conservan ambas copias. Guardado explícito requerido."
+        )
+        _credential_presence.update({
+            key: bool(windows_credentials.get(key) or fallback_credentials.get(key))
+            for key in CREDENTIAL_KEYS
+        })
+        _update_credential_status()
+        return {}
+    combined = {
+        key: (
+            windows_credentials.get(key)
+            or fallback_credentials.get(key)
+            or ""
+        )
         for key in CREDENTIAL_KEYS
     }
+    errors = tuple(error for error in (windows_error, fallback_error) if error)
+    _set_backend_status_from_sources(windows_credentials, fallback_credentials, errors)
+    _credential_conflict_detected = False
+    _credential_migration_pending = bool(
+        errors or (os.name == "nt" and windows_credentials and fallback_credentials)
+    )
+    return combined
+
+
+def _verify_stored_credentials(credentials):
+    windows_credentials, fallback_credentials, windows_error, fallback_error = _read_credential_sources()
+    errors = tuple(error for error in (windows_error, fallback_error) if error)
+    if windows_credentials == credentials and os.name == "nt" and not windows_error:
+        return "Credential Manager verificado"
+    if fallback_credentials == credentials and not fallback_error:
+        return f"Archivo local SIN CIFRAR: {_credential_file_path()}"
+    raise CredentialPersistenceError(
+        "La relectura no coincide con el conjunto guardado{}".format(
+            ": " + "; ".join(_safe_error(error, credentials) for error in errors)
+            if errors else ""
+        )
+    )
+
+
+def _save_credentials(credentials, allow_plaintext_fallback=False, resolve_conflict=False):
+    global _credential_backend_status
+    normalized = _normalize_credentials(credentials)
+    windows_error = None
+    if _credential_conflict_detected and not resolve_conflict:
+        raise CredentialPersistenceError(
+            "Hay credenciales divergentes entre Credential Manager y el archivo local; "
+            "resuélvelo con un guardado explícito de los cuatro campos."
+        )
+
     if os.name == "nt":
         try:
             _write_windows_credentials(normalized)
-        except (OSError, ValueError) as error:
-            _log_fallback_warning(
-                f"No se pudo guardar en el Administrador de credenciales de Windows ({_safe_error(error)})."
+            verified_backend = _verify_stored_credentials(normalized)
+            if verified_backend != "Credential Manager verificado":
+                raise CredentialPersistenceError("Credential Manager no confirmó el read-back.")
+            try:
+                _remove_fallback_credentials()
+            except OSError as error:
+                _credential_backend_status = (
+                    f"Credential Manager verificado; archivo local SIN CIFRAR aún presente: "
+                    f"{_credential_file_path()}"
+                )
+                raise CredentialSourceCleanupError(
+                    "No se pudo eliminar el archivo local anterior: {}".format(_safe_error(error, normalized))
+                ) from error
+            _credential_backend_status = verified_backend
+            _update_credential_status()
+            return verified_backend
+        except CredentialSourceCleanupError:
+            _update_credential_status()
+            raise
+        except (OSError, ValueError, CredentialPersistenceError) as error:
+            windows_error = error
+            if not allow_plaintext_fallback:
+                _credential_backend_status = (
+                    "Fallo de Credential Manager; origen anterior conservado. "
+                    + _safe_error(error, normalized)
+                )
+                _update_credential_status()
+                raise CredentialPersistenceError(_credential_backend_status) from error
+
+    if not allow_plaintext_fallback:
+        _credential_backend_status = (
+            "Fallo de persistencia: habilita explícitamente el fallback plaintext para guardar "
+            "en " + _credential_file_path()
+        )
+        if windows_error:
+            _credential_backend_status += "; Credential Manager: " + _safe_error(windows_error, normalized)
+        _update_credential_status()
+        raise CredentialPersistenceError(_credential_backend_status)
+
+    try:
+        _write_fallback_credentials(normalized)
+        if _read_fallback_credentials() != normalized:
+            raise CredentialPersistenceError("La relectura del archivo local no coincide.")
+    except (OSError, ValueError, CredentialPersistenceError) as error:
+        _credential_backend_status = "Fallo de persistencia del archivo local SIN CIFRAR: {}".format(
+            _safe_error(error, normalized)
+        )
+        _update_credential_status()
+        raise CredentialPersistenceError(_credential_backend_status) from error
+
+    _credential_backend_status = f"Archivo local SIN CIFRAR: {_credential_file_path()}"
+    if windows_error:
+        try:
+            _delete_windows_credentials()
+        except OSError as error:
+            _credential_backend_status = (
+                "Fallback local verificado, pero Credential Manager podría conservar otra copia; "
+                f"archivo local SIN CIFRAR: {_credential_file_path()}."
             )
-        else:
-            _remove_fallback_credentials()
-            return
-    _write_fallback_credentials(normalized)
+            _update_credential_status()
+            raise CredentialSourceCleanupError(
+                "No se pudo eliminar la copia anterior de Credential Manager: "
+                + _safe_error(error, normalized)
+            ) from error
+    _log_fallback_warning(
+        "Se habilitó explícitamente el fallback plaintext. En Windows este archivo no está cifrado por OBS."
+    )
+    _update_credential_status()
+    return _credential_backend_status
 
 
-def _clear_credentials():
+def _pending_credentials_from_settings(settings):
+    raw_pending = obs.obs_data_get_string(settings, CREDENTIALS_PENDING_SETTING)
+    if not raw_pending:
+        return {}
+    try:
+        pending = json.loads(raw_pending)
+    except json.JSONDecodeError as error:
+        raise ValueError("El almacén pendiente de OBS no contiene JSON válido.") from error
+    if not isinstance(pending, dict):
+        raise ValueError("El almacén pendiente de OBS debe ser un objeto JSON.")
+    return _normalize_credentials(pending)
+
+
+def _legacy_credentials_from_settings(settings):
+    pending = _pending_credentials_from_settings(settings)
+    visible = _credentials_from_settings(settings)
+    return {
+        key: visible.get(key) or pending.get(key) or ""
+        for key in CREDENTIAL_KEYS
+    }
+
+
+def _preserve_pending_credentials(settings, credentials):
+    normalized = _normalize_credentials(credentials)
+    obs.obs_data_set_string(
+        settings,
+        CREDENTIALS_PENDING_SETTING,
+        json.dumps(normalized, ensure_ascii=False) if any(normalized.values()) else "",
+    )
+    for key in CREDENTIAL_KEYS:
+        obs.obs_data_set_string(settings, key, "")
+
+
+def _clear_credentials_from_settings(settings):
+    for key in CREDENTIAL_KEYS:
+        obs.obs_data_set_string(settings, key, "")
+    obs.obs_data_set_string(settings, CREDENTIALS_PENDING_SETTING, "")
+
+
+def _clear_credentials(settings=None):
+    global _credential_backend_status
+    global _credential_migration_pending, _credential_conflict_detected
+    errors = []
+    retained_sources = []
     if os.name == "nt":
-        _delete_windows_credentials()
-    _remove_fallback_credentials()
+        try:
+            _delete_windows_credentials()
+        except OSError as error:
+            errors.append("Credential Manager: {}".format(_safe_error(error)))
+            retained_sources.append("Credential Manager")
+    try:
+        _remove_fallback_credentials()
+    except OSError as error:
+        errors.append("Archivo local SIN CIFRAR: {}".format(_safe_error(error)))
+        retained_sources.append(f"archivo local SIN CIFRAR {_credential_file_path()}")
+    if settings is not None:
+        _clear_credentials_from_settings(settings)
+    if errors:
+        _credential_migration_pending = True
+        _credential_backend_status = "Error parcial al borrar; permanecen: {}".format(
+            ", ".join(retained_sources)
+        )
+        _update_credential_status()
+        raise CredentialPersistenceError("; ".join(errors))
+    _credential_backend_status = "No hay credenciales guardadas."
+    _credential_migration_pending = False
+    _credential_conflict_detected = False
+    _update_credential_status()
 
 
 def _persist_runtime_credentials():
-    credentials = {
-        key: globals()[key]
-        for key in CREDENTIAL_KEYS
-    }
-    try:
-        _save_credentials(credentials)
-    except (OSError, ValueError) as error:
-        obs.script_log(
-            obs.LOG_INFO,
-            f"[{PLUGIN_NAME}] [ERROR] No se pudieron persistir las credenciales renovadas: {_safe_error(error)}"
-        )
-        return False
+    credentials = {key: globals()[key] for key in CREDENTIAL_KEYS}
+    _queue_main_thread_action("persist_credentials", credentials)
     return True
 
 
@@ -326,42 +651,67 @@ def on_scene_selection_changed(props, prop, settings):
     obs.obs_properties_apply_settings(props, settings)
     return True
 
+def _read_scene_map(settings):
+    if not settings:
+        return {}
+
+    scene_map_json = obs.obs_data_get_string(settings, "scene_map_json")
+    if scene_map_json:
+        try:
+            scene_map = json.loads(scene_map_json)
+            if isinstance(scene_map, dict) and scene_map:
+                return scene_map
+            if not isinstance(scene_map, dict):
+                return {}
+        except json.JSONDecodeError as error:
+            obs.script_log(
+                obs.LOG_INFO,
+                f"[{PLUGIN_NAME}] [ERROR] El mapa de escenas guardado no es JSON válido: {_safe_error(error)}"
+            )
+            return {}
+
+    try:
+        legacy_map = obs.obs_data_get_obj(settings, "scene_map")
+        if not legacy_map:
+            return {}
+        try:
+            legacy_map_json = obs.obs_data_get_json(legacy_map)
+        finally:
+            obs.obs_data_release(legacy_map)
+        legacy_map = json.loads(legacy_map_json)
+        if not isinstance(legacy_map, dict):
+            return {}
+        obs.obs_data_set_string(settings, "scene_map_json", json.dumps(legacy_map, ensure_ascii=False))
+        obs.obs_data_set_string(settings, "scene_map", "")
+        return legacy_map
+    except (RecursionError, ValueError, json.JSONDecodeError) as error:
+        obs.script_log(
+            obs.LOG_INFO,
+            f"[{PLUGIN_NAME}] [ERROR] No se pudo migrar el mapa de escenas antiguo; se inicia uno vacío: {_safe_error(error)}"
+        )
+        obs.obs_data_set_string(settings, "scene_map_json", "{}")
+        obs.obs_data_set_string(settings, "scene_map", "")
+        return {}
+
 def get_scene_data_from_obs(settings, scene_name):
     """Obtiene el título y la categoría de una escena guardada en las settings nativas de OBS."""
     if not settings or not scene_name:
         return "", ""
-    
-    scene_map = obs.obs_data_get_obj(settings, "scene_map")
-    if not scene_map:
+
+    scene_item = _read_scene_map(settings).get(scene_name, {})
+    if not isinstance(scene_item, dict):
         return "", ""
-    
-    scene_item = obs.obs_data_get_obj(scene_map, scene_name)
-    title, category = "", ""
-    if scene_item:
-        title = obs.obs_data_get_string(scene_item, "title")
-        category = obs.obs_data_get_string(scene_item, "category")
-        obs.obs_data_release(scene_item)
-    obs.obs_data_release(scene_map)
-    return title, category
+    return scene_item.get("title", ""), scene_item.get("category", "")
 
 def save_scene_data_to_obs(settings, scene_name, title, category):
     """Guarda el título y la categoría de una escena directamente en el sistema de settings de OBS."""
     if not settings or not scene_name:
         return
-    
-    scene_map = obs.obs_data_get_obj(settings, "scene_map")
-    if not scene_map:
-        scene_map = obs.obs_data_create()
-        
-    scene_item = obs.obs_data_create()
-    obs.obs_data_set_string(scene_item, "title", title)
-    obs.obs_data_set_string(scene_item, "category", category)
-    
-    obs.obs_data_set_obj(scene_map, scene_name, scene_item)
-    obs.obs_data_set_obj(settings, "scene_map", scene_map)
-    
-    obs.obs_data_release(scene_item)
-    obs.obs_data_release(scene_map)
+
+    scene_map = _read_scene_map(settings)
+    scene_map[scene_name] = {"title": title, "category": category}
+    obs.obs_data_set_string(settings, "scene_map_json", json.dumps(scene_map, ensure_ascii=False))
+    obs.obs_data_set_string(settings, "scene_map", "")
     obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] ✓ Guardado nativo en OBS para escena '{scene_name}'")
 
 def script_description():
@@ -381,6 +731,7 @@ def on_refresh_button_clicked(properties, property):
 def on_force_refresh_clicked(properties, property):
     obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Iniciando refresco forzado del token...")
     refresh_twitch_token()
+    _update_credential_status()
     return True
 
 def open_manual_token_generator(properties=None, property=None):
@@ -397,8 +748,29 @@ def _credentials_from_settings(settings):
     return {key: obs.obs_data_get_string(settings, key) for key in CREDENTIAL_KEYS}
 
 
+def _credentials_from_legacy_config(config_data):
+    if not isinstance(config_data, dict):
+        raise ValueError("El archivo de ajustes debe contener un objeto JSON")
+
+    aliases = {
+        "twitch_client_id": ("twitch_client_id", "client_id"),
+        "twitch_client_secret": ("twitch_client_secret", "client_secret"),
+        "twitch_oauth_token": ("twitch_oauth_token", "oauth_token", "access_token"),
+        "twitch_refresh_token": ("twitch_refresh_token", "refresh_token"),
+    }
+    credentials = {}
+    for key, legacy_keys in aliases.items():
+        for legacy_key in legacy_keys:
+            value = config_data.get(legacy_key)
+            if isinstance(value, str) and value:
+                credentials[key] = value
+                break
+    return credentials
+
+
 def _set_runtime_credentials(credentials):
     global twitch_client_id, twitch_client_secret, twitch_oauth_token, twitch_refresh_token
+    global _credential_validation_status
     twitch_client_id = credentials.get("twitch_client_id", "")
     twitch_client_secret = credentials.get("twitch_client_secret", "")
     twitch_oauth_token = credentials.get("twitch_oauth_token", "")
@@ -411,15 +783,198 @@ def _set_runtime_credentials(credentials):
         twitch_oauth_token = ""
     if not isinstance(twitch_refresh_token, str):
         twitch_refresh_token = ""
-
-
-def _clear_credentials_from_settings(settings):
     for key in CREDENTIAL_KEYS:
-        obs.obs_data_set_string(settings, key, "")
+        _credential_presence[key] = bool(globals()[key])
+    _credential_validation_status = (
+        "Credenciales disponibles; access token todavía sin comprobar."
+        if any((twitch_client_id, twitch_client_secret, twitch_oauth_token, twitch_refresh_token))
+        else "No hay credenciales guardadas."
+    )
+    _update_credential_status()
+
+
+def _migrate_credentials(settings, legacy_credentials=None, preserve_legacy=True):
+    global _credential_backend_status, _credential_migration_pending, _credential_conflict_detected
+    _credential_migration_pending = False
+    _credential_conflict_detected = False
+    try:
+        pending = _pending_credentials_from_settings(settings)
+    except ValueError as error:
+        windows_credentials, fallback_credentials, windows_error, fallback_error = _read_credential_sources()
+        conflicts = _credential_source_conflicts(windows_credentials, fallback_credentials)
+        if conflicts:
+            _credential_conflict_detected = True
+            _credential_migration_pending = True
+            _set_runtime_credentials({})
+            _credential_presence.update({
+                key: bool(windows_credentials.get(key) or fallback_credentials.get(key))
+                for key in CREDENTIAL_KEYS
+            })
+            _credential_backend_status = (
+                "Fallo al leer credenciales pendientes de OBS; además hay discrepancias entre "
+                "Credential Manager y el archivo local SIN CIFRAR. Se conservan ambas copias."
+            )
+            _credential_validation_status = "Validación detenida hasta resolver el conflicto entre almacenes."
+            _update_credential_status()
+            return False
+        recoverable = {
+            key: windows_credentials.get(key) or fallback_credentials.get(key) or ""
+            for key in CREDENTIAL_KEYS
+        }
+        _set_runtime_credentials(recoverable)
+        source_errors = tuple(error for error in (windows_error, fallback_error) if error)
+        details = "; ".join(_safe_error(error, recoverable) for error in source_errors)
+        _credential_backend_status = (
+            "Fallo al leer credenciales pendientes de OBS; no se han borrado. "
+            + _safe_error(error, recoverable)
+            + (" Errores de almacén: " + details if details else "")
+        )
+        _credential_migration_pending = True
+        _update_credential_status()
+        return False
+    visible = _credentials_from_settings(settings)
+    legacy = {
+        key: (
+            (legacy_credentials or {}).get(key)
+            or visible.get(key)
+            or pending.get(key)
+            or ""
+        )
+        for key in CREDENTIAL_KEYS
+    }
+    windows_credentials, fallback_credentials, windows_error, fallback_error = _read_credential_sources()
+    read_errors = tuple(error for error in (windows_error, fallback_error) if error)
+    conflicts = _credential_source_conflicts(windows_credentials, fallback_credentials)
+    if conflicts:
+        _credential_conflict_detected = True
+        _credential_migration_pending = True
+        _credential_presence.update({
+            key: bool(
+                windows_credentials.get(key)
+                or fallback_credentials.get(key)
+                or legacy.get(key)
+            )
+            for key in CREDENTIAL_KEYS
+        })
+        _set_runtime_credentials({})
+        _credential_presence.update({
+            key: bool(
+                windows_credentials.get(key)
+                or fallback_credentials.get(key)
+                or legacy.get(key)
+            )
+            for key in CREDENTIAL_KEYS
+        })
+        _credential_backend_status = (
+            f"Conflicto entre Credential Manager y archivo local SIN CIFRAR ({_credential_file_path()}); "
+            "se conservan ambas copias. "
+            "Guardado explícito de los cuatro campos requerido."
+        )
+        if any(legacy.values()) and preserve_legacy:
+            _preserve_pending_credentials(settings, legacy)
+            _credential_backend_status += " Las credenciales legacy de OBS siguen pendientes de migración."
+        _credential_validation_status = "Validación detenida hasta resolver el conflicto entre almacenes."
+        _update_credential_status()
+        return False
+    credentials = {
+        key: (
+            windows_credentials.get(key)
+            or fallback_credentials.get(key)
+            or legacy.get(key)
+            or ""
+        )
+        for key in CREDENTIAL_KEYS
+    }
+    _set_runtime_credentials(credentials)
+
+    if read_errors:
+        details = "; ".join(_safe_error(error, credentials) for error in read_errors)
+        _credential_backend_status = "Fallo de lectura del almacén: " + details
+        if any(legacy.values()) and preserve_legacy:
+            _preserve_pending_credentials(settings, legacy)
+            _credential_backend_status += "; credenciales todavía en ajustes OBS / migración pendiente."
+        _credential_migration_pending = True
+        _update_credential_status()
+        return False
+
+    if not any(credentials.values()):
+        _set_backend_status_from_sources(windows_credentials, fallback_credentials)
+        _credential_migration_pending = False
+        return True
+
+    consent = obs.obs_data_get_bool(settings, "allow_plaintext_fallback")
+    needs_store = bool(any(legacy.values()))
+    if os.name == "nt":
+        needs_store = needs_store or windows_credentials != credentials
+        if windows_credentials == credentials and any(fallback_credentials.values()):
+            try:
+                _remove_fallback_credentials()
+                fallback_credentials = {}
+            except OSError as error:
+                _credential_backend_status = (
+                    "Credential Manager verificado; no se pudo eliminar el archivo local SIN CIFRAR "
+                    f"{_credential_file_path()}."
+                )
+                if any(legacy.values()) and preserve_legacy:
+                    _preserve_pending_credentials(settings, legacy)
+                _credential_migration_pending = True
+                _update_credential_status()
+                return False
+    else:
+        needs_store = needs_store and fallback_credentials != credentials
+
+    if needs_store:
+        try:
+            _save_credentials(credentials, consent)
+        except (OSError, ValueError, CredentialPersistenceError) as error:
+            retained = []
+            if windows_credentials:
+                retained.append("Credential Manager")
+            if fallback_credentials:
+                retained.append(f"archivo local SIN CIFRAR {_credential_file_path()}")
+            if any(legacy.values()) and preserve_legacy:
+                _preserve_pending_credentials(settings, legacy)
+                retained.append("ajustes OBS / migración pendiente")
+            _credential_backend_status = (
+                "Fallo de persistencia; origen conservado: {}. Destino/estado: {}. {}".format(
+                    ", ".join(retained) or "no se confirmó ningún almacén",
+                    _credential_backend_status,
+                    _safe_error(error, credentials),
+                )
+            )
+            _credential_migration_pending = True
+            _update_credential_status()
+            return False
+    elif fallback_credentials:
+        _credential_backend_status = f"Archivo local SIN CIFRAR: {_credential_file_path()}"
+        _log_fallback_warning("Se detectó un almacén local de credenciales.")
+    elif windows_credentials:
+        _credential_backend_status = "Credential Manager verificado"
+
+    if any(legacy.values()) and preserve_legacy:
+        _clear_credentials_from_settings(settings)
+    _credential_conflict_detected = False
+    _credential_migration_pending = False
+    _update_credential_status()
+    return True
 
 
 def on_save_credentials_clicked(properties, property):
+    global _credential_backend_status, _credential_validation_status
+    global _credential_migration_pending, _credential_conflict_detected
     settings_credentials = _credentials_from_settings(_script_settings)
+    if _credential_conflict_detected and not all(settings_credentials.values()):
+        _credential_migration_pending = True
+        _credential_backend_status = (
+            "Conflicto entre almacenes: introduce los cuatro campos y pulsa Guardar "
+            "para resolverlo. Ambas copias anteriores se conservan."
+        )
+        _update_credential_status()
+        obs.script_log(
+            obs.LOG_INFO,
+            f"[{PLUGIN_NAME}] [ERROR] Para resolver el conflicto, introduce los cuatro campos antes de guardar."
+        )
+        return True
     credentials = {
         key: settings_credentials[key] or globals()[key]
         for key in CREDENTIAL_KEYS
@@ -429,54 +984,84 @@ def on_save_credentials_clicked(properties, property):
         return True
 
     try:
-        _save_credentials(credentials)
-    except (OSError, ValueError) as error:
+        backend = _save_credentials(
+            credentials,
+            obs.obs_data_get_bool(_script_settings, "allow_plaintext_fallback"),
+            resolve_conflict=_credential_conflict_detected,
+        )
+    except (OSError, ValueError, CredentialPersistenceError) as error:
+        _credential_migration_pending = True
+        _credential_presence.update({key: bool(value) for key, value in credentials.items()})
+        _credential_backend_status = (
+            _credential_backend_status
+            + "; no se eliminó ninguna copia anterior. "
+            + _safe_error(error, credentials)
+        )
+        _update_credential_status()
         obs.script_log(
             obs.LOG_INFO,
             f"[{PLUGIN_NAME}] [ERROR] No se pudieron guardar las credenciales: "
-            f"{_safe_error(error, settings_credentials)}"
+            f"{_safe_error(error, credentials)}"
         )
         obs.script_log(
             obs.LOG_INFO,
-            f"[{PLUGIN_NAME}] [AVISO] Si había credenciales en los ajustes de OBS, permanecerán allí hasta que se guarden correctamente."
+            f"[{PLUGIN_NAME}] [AVISO] No se eliminaron las credenciales de su origen anterior."
         )
         return True
 
     _set_runtime_credentials(credentials)
     _clear_credentials_from_settings(_script_settings)
+    _credential_backend_status = backend
+    _credential_migration_pending = False
+    _credential_validation_status = "Access token todavía sin comprobar."
+    _credential_migration_pending = False
+    _credential_conflict_detected = False
+    _update_credential_status()
     obs.obs_properties_apply_settings(properties, _script_settings)
-    obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Credenciales guardadas fuera de los ajustes de OBS.")
+    obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Credenciales verificadas en {backend}.")
     return True
 
 
 def on_clear_credentials_clicked(properties, property):
+    global _credential_backend_status, _credential_validation_status
     try:
-        _clear_credentials()
-    except OSError as error:
+        _clear_credentials(_script_settings)
+    except (OSError, CredentialPersistenceError) as error:
+        _credential_validation_status = "Borrado parcial; comprueba las copias indicadas."
+        _update_credential_status()
         obs.script_log(
             obs.LOG_INFO,
             f"[{PLUGIN_NAME}] [ERROR] No se pudieron borrar las credenciales: {_safe_error(error)}"
         )
+        obs.obs_properties_apply_settings(properties, _script_settings)
         return True
 
     _set_runtime_credentials({})
-    _clear_credentials_from_settings(_script_settings)
+    _credential_backend_status = "No hay credenciales guardadas."
+    _credential_validation_status = "Credenciales borradas."
+    _update_credential_status()
     obs.obs_properties_apply_settings(properties, _script_settings)
-    obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Credenciales borradas.")
+    obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Todas las copias conocidas de credenciales fueron borradas.")
     return True
 
 
 def script_properties():
     props = obs.obs_properties_create()
     obs.obs_properties_add_bool(props, "enabled", "Plugin Activo")
+    options_props = obs.obs_properties_create()
     
     active_scene = get_active_scene_name()
-    selected_scene = obs.obs_data_get_string(_script_settings, "selected_scene") if _script_settings else ""
-    if not selected_scene:
-        selected_scene = active_scene
+    selected_scene = active_scene or (
+        obs.obs_data_get_string(_script_settings, "selected_scene")
+        if _script_settings else ""
+    )
     t_saved, c_saved = get_scene_data_from_obs(_script_settings, selected_scene)
+    if _script_settings and selected_scene:
+        obs.obs_data_set_string(_script_settings, "selected_scene", selected_scene)
+        obs.obs_data_set_string(_script_settings, "current_scene_title", t_saved)
+        obs.obs_data_set_string(_script_settings, "current_scene_category", c_saved)
 
-    scene_props = obs.obs_properties_create()
+    scene_props = options_props
     p_scene = obs.obs_properties_add_list(
         scene_props, "selected_scene", "Escena para editar",
         obs.OBS_COMBO_TYPE_LIST, obs.OBS_COMBO_FORMAT_STRING
@@ -548,12 +1133,6 @@ def script_properties():
     if c_saved:
         obs.obs_property_list_add_string(p_cat, c_saved, c_saved)
 
-    # Inicializa los controles a partir de la escena seleccionada, no necesariamente la activa.
-    if _script_settings:
-        obs.obs_data_set_string(_script_settings, "selected_scene", selected_scene)
-        obs.obs_data_set_string(_script_settings, "current_scene_title", t_saved)
-        obs.obs_data_set_string(_script_settings, "current_scene_category", c_saved)
-
     obs.obs_properties_add_text(scene_props, "global_suffix", "Coletilla global", obs.OBS_TEXT_DEFAULT)
     obs.obs_properties_add_bool(scene_props, "block_if_streaming", "🚫 NO cambiar info automáticamente mientras emitas (Permite cambios manuales)")
 
@@ -568,17 +1147,28 @@ def script_properties():
     obs.obs_properties_add_int(scene_props, "delay_seconds", "Segundos de retardo", 5, 3600, 5)
     obs.obs_properties_add_button(scene_props, "apply_button", "⚡ Aplicar y Actualizar Info", on_apply_clicked)
     
-    obs.obs_properties_add_group(props, "scene_group", "📺 Configuración de Escenas y Directo", obs.OBS_GROUP_NORMAL, scene_props)
-
-    twitch_props = obs.obs_properties_create()
+    twitch_props = options_props
+    global _credential_status_property
     obs.obs_properties_add_text(twitch_props, "twitch_client_id", "Twitch Client ID", obs.OBS_TEXT_PASSWORD)
     obs.obs_properties_add_text(twitch_props, "twitch_client_secret", "Twitch Client Secret", obs.OBS_TEXT_PASSWORD)
     obs.obs_properties_add_text(twitch_props, "twitch_oauth_token", "Twitch Access Token", obs.OBS_TEXT_PASSWORD)
     obs.obs_properties_add_text(twitch_props, "twitch_refresh_token", "Twitch Refresh Token", obs.OBS_TEXT_PASSWORD)
     obs.obs_properties_add_text(
         twitch_props,
+        "credential_status",
+        _credential_status_text(),
+        obs.OBS_TEXT_INFO,
+    )
+    _credential_status_property = obs.obs_properties_get(twitch_props, "credential_status")
+    obs.obs_properties_add_bool(
+        twitch_props,
+        "allow_plaintext_fallback",
+        "Permitir fallback local SIN CIFRAR (requiere consentimiento)",
+    )
+    obs.obs_properties_add_text(
+        twitch_props,
         "credentials_help",
-        "Introduce credenciales y pulsa Guardar para retirarlas de los ajustes de OBS. Vacío mantiene las credenciales guardadas.",
+        "Los campos permanecen vacíos para credenciales guardadas. El fallback solo se escribirá si habilitas expresamente la opción anterior; el archivo es texto plano. En Windows, el acceso depende de las ACL de tu perfil. En Unix se aplican permisos 0600. Si Credential Manager y el archivo local discrepan, se conservan ambos y debes resolver el conflicto guardando los cuatro campos. Sin Client Secret, la renovación envía el refresh token a TwitchTokenGenerator.com.",
         obs.OBS_TEXT_INFO
     )
     obs.obs_properties_add_button(twitch_props, "save_credentials_button", "🔒 Guardar credenciales", on_save_credentials_clicked)
@@ -590,9 +1180,7 @@ def script_properties():
     obs.obs_properties_add_button(twitch_props, "refresh_token_button", "🔍 Comprobar Token", on_refresh_button_clicked)
     obs.obs_properties_add_button(twitch_props, "force_refresh_button", "🔄 Forzar Refresco de Token", on_force_refresh_clicked)
 
-    obs.obs_properties_add_group(props, "twitch_group", "🔐 Credenciales y Conexión Twitch", obs.OBS_GROUP_NORMAL, twitch_props)
-
-    mng_props = obs.obs_properties_create()
+    mng_props = options_props
     obs.obs_properties_add_path(
         mng_props, "settings_path", "Carpeta donde guardar ajustes",
         obs.OBS_PATH_DIRECTORY, "",
@@ -600,7 +1188,13 @@ def script_properties():
     )
     obs.obs_properties_add_button(mng_props, "export_btn", "💾 Guardar Ajustes", on_export_settings)
     obs.obs_properties_add_button(mng_props, "import_btn", "📂 Cargar Ajustes", on_import_settings)
-    obs.obs_properties_add_group(props, "settings_mng", "Gestión de ajustes", obs.OBS_GROUP_NORMAL, mng_props)
+    obs.obs_properties_add_group(
+        props,
+        "options_group",
+        "Opciones del plugin",
+        obs.OBS_GROUP_NORMAL,
+        options_props,
+    )
 
     return props
 
@@ -614,6 +1208,9 @@ def script_defaults(settings):
     obs.obs_data_set_default_string(settings, "twitch_client_secret", "")
     obs.obs_data_set_default_string(settings, "twitch_oauth_token", "")
     obs.obs_data_set_default_string(settings, "twitch_refresh_token", "")
+    obs.obs_data_set_default_bool(settings, "allow_plaintext_fallback", False)
+    obs.obs_data_set_default_string(settings, CREDENTIALS_PENDING_SETTING, "")
+    obs.obs_data_set_default_string(settings, "scene_map_json", "{}")
     obs.obs_data_set_default_string(settings, "broadcaster_id", "")
     obs.obs_data_set_default_string(settings, "twitch_scopes", "channel:manage:broadcast user:read:chat")
     obs.obs_data_set_default_int(settings,    "last_refresh_timestamp", 0)
@@ -658,44 +1255,10 @@ def script_update(settings):
     update_mode        = obs.obs_data_get_int(settings,    "update_mode")
     delay_seconds      = obs.obs_data_get_int(settings,    "delay_seconds")
     broadcaster_id     = obs.obs_data_get_string(settings, "broadcaster_id")
-    settings_credentials = _credentials_from_settings(settings)
     if is_first_load:
-        stored_credentials = _load_credentials()
-        if any(stored_credentials.values()):
-            credentials = {
-                key: stored_credentials.get(key) or settings_credentials[key]
-                for key in CREDENTIAL_KEYS
-            }
-            _set_runtime_credentials(credentials)
-            if credentials != stored_credentials:
-                try:
-                    _save_credentials(credentials)
-                    _clear_credentials_from_settings(settings)
-                except (OSError, ValueError) as error:
-                    obs.script_log(
-                        obs.LOG_INFO,
-                        f"[{PLUGIN_NAME}] [ERROR] No se pudieron completar las credenciales guardadas: {_safe_error(error)}"
-                    )
-            else:
-                _clear_credentials_from_settings(settings)
-        elif any(settings_credentials.values()):
-            _set_runtime_credentials(settings_credentials)
-            try:
-                _save_credentials(settings_credentials)
-                _clear_credentials_from_settings(settings)
-                obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Credenciales migradas al almacenamiento local.")
-            except (OSError, ValueError) as error:
-                obs.script_log(
-                    obs.LOG_INFO,
-                    f"[{PLUGIN_NAME}] [ERROR] No se pudieron migrar las credenciales: {_safe_error(error)}"
-                )
-                obs.script_log(
-                    obs.LOG_INFO,
-                    f"[{PLUGIN_NAME}] [AVISO] Las credenciales antiguas siguen en los ajustes de OBS."
-                )
-        else:
-            _set_runtime_credentials({})
+        _migrate_credentials(settings)
     else:
+        settings_credentials = _legacy_credentials_from_settings(settings)
         current_credentials = {
             key: settings_credentials[key] or globals()[key]
             for key in CREDENTIAL_KEYS
@@ -730,14 +1293,36 @@ def execute_stream_info_update(update_category=True, allow_during_streaming=Fals
     obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Aplicando info para escena '{active_scene}' -> Título: '{final_title}' | Categoría: '{final_category}'")
 
     category_to_update = final_category if update_category else ""
+    _start_stream_info_worker(final_title, category_to_update)
+
+
+def _run_stream_info_update(title, category):
+    try:
+        if not _http_stop_event.is_set():
+            update_stream_info_helix(title, category)
+    finally:
+        with _http_workers_lock:
+            _http_workers.discard(threading.current_thread())
+
+
+def _start_stream_info_worker(title, category):
     worker = threading.Thread(
-        target=update_stream_info_helix,
-        args=(final_title, category_to_update),
-        daemon=True
+        target=_run_stream_info_update,
+        args=(title, category),
+        daemon=True,
     )
-    worker.start()
+    with _http_workers_lock:
+        _http_workers.add(worker)
+    try:
+        worker.start()
+    except Exception:
+        with _http_workers_lock:
+            _http_workers.discard(worker)
+        raise
 
 def get_game_id_by_name(game_name, headers):
+    if _http_stop_event.is_set():
+        return None
     if not game_name or game_name.lower() == "juego": return None
     url = f"https://api.twitch.tv/helix/games?name={urllib.parse.quote(game_name)}"
     req = urllib.request.Request(url, headers=headers, method='GET')
@@ -747,10 +1332,12 @@ def get_game_id_by_name(game_name, headers):
             games = res_data.get("data", [])
             if games: return games[0].get("id")
     except Exception as e:
-        obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error buscando categoría: {_safe_error(e)}")
+        _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error buscando categoría: {e}")
     return None
 
 def get_broadcaster_id_automatically(headers):
+    if _http_stop_event.is_set():
+        return None
     url = "https://api.twitch.tv/helix/users"
     req = urllib.request.Request(url, headers=headers, method='GET')
     try:
@@ -759,13 +1346,19 @@ def get_broadcaster_id_automatically(headers):
             users = res_data.get("data", [])
             if users: return users[0].get("id")
     except Exception as e:
-        obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error obteniendo Broadcaster ID: {_safe_error(e)}")
+        _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error obteniendo Broadcaster ID: {e}")
     return None
 
 def refresh_twitch_token():
     global twitch_oauth_token, twitch_refresh_token, twitch_client_id, twitch_client_secret
+    global _credential_validation_status
     
-    if not twitch_refresh_token: return False
+    if _http_stop_event.is_set():
+        return False
+    if not twitch_refresh_token:
+        _credential_validation_status = "No hay refresh token para renovar el access token."
+        _queue_main_thread_action("credential_status")
+        return False
 
     if twitch_client_secret and twitch_client_id:
         url = "https://id.twitch.tv/oauth2/token"
@@ -780,12 +1373,14 @@ def refresh_twitch_token():
                 if res_data.get("access_token"):
                     twitch_oauth_token = res_data["access_token"]
                     if res_data.get("refresh_token"): twitch_refresh_token = res_data["refresh_token"]
-                    if _script_settings:
-                        obs.obs_data_set_int(_script_settings, "last_refresh_timestamp", int(time.time()))
+                    _queue_main_thread_action("refresh_timestamp", int(time.time()))
                     _persist_runtime_credentials()
+                    _credential_validation_status = "Token renovado; el access token aún no se ha validado."
+                    _queue_main_thread_action("credential_status")
                     return True
         except Exception as e:
-            obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error API oficial: {_safe_error(e)}")
+            _credential_validation_status = "Falló la renovación del token; revisa el log."
+            _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error API oficial: {e}")
     else:
         url = f"https://twitchtokengenerator.com/api/refresh/{twitch_refresh_token.strip()}"
         req = urllib.request.Request(url, method='GET')
@@ -796,23 +1391,30 @@ def refresh_twitch_token():
                 if res_data.get("success"):
                     twitch_oauth_token = res_data.get("token")
                     twitch_refresh_token = res_data.get("refresh")
-                    if _script_settings:
-                        obs.obs_data_set_int(_script_settings, "last_refresh_timestamp", int(time.time()))
+                    _queue_main_thread_action("refresh_timestamp", int(time.time()))
                     _persist_runtime_credentials()
+                    _credential_validation_status = "Token renovado; el access token aún no se ha validado."
+                    _queue_main_thread_action("credential_status")
                     return True
         except Exception as e:
-            obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error API gen: {_safe_error(e)}")
+            _credential_validation_status = "Falló la renovación del token; revisa el log."
+            _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error API gen: {e}")
+    _queue_main_thread_action("credential_status")
     return False
 
 def update_stream_info_helix(title, category):
     global twitch_oauth_token, twitch_refresh_token
+    if _http_stop_event.is_set():
+        return
     if not twitch_client_id or not twitch_oauth_token: return
 
     headers = {"Client-ID": twitch_client_id, "Authorization": f"Bearer {twitch_oauth_token.replace('oauth:', '').strip()}", "Content-Type": "application/json"}
     current_broadcaster_id = broadcaster_id or get_broadcaster_id_automatically(headers)
-    if not current_broadcaster_id: return
+    if not current_broadcaster_id or _http_stop_event.is_set(): return
 
     game_id = get_game_id_by_name(category, headers) if category else None
+    if _http_stop_event.is_set():
+        return
     url = f"https://api.twitch.tv/helix/channels?broadcaster_id={current_broadcaster_id}"
     body = {}
     if title: body["title"] = title
@@ -822,38 +1424,42 @@ def update_stream_info_helix(title, category):
 
     data = json.dumps(body).encode('utf-8')
     req = urllib.request.Request(url, data=data, headers=headers, method='PATCH')
+    if _http_stop_event.is_set():
+        return
 
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
             if response.status in (204, 200):
-                obs.script_log(obs.LOG_INFO, f"✓ [{PLUGIN_NAME}] ¡Información actualizada!")
+                _queue_obs_log(obs.LOG_INFO, f"✓ [{PLUGIN_NAME}] ¡Información actualizada!")
                 return
     except urllib.error.HTTPError as he:
-        if he.code == 401 and refresh_twitch_token():
+        if he.code == 401 and not _http_stop_event.is_set() and refresh_twitch_token():
+            if _http_stop_event.is_set():
+                return
             headers["Authorization"] = f"Bearer {twitch_oauth_token.strip()}"
             req_retry = urllib.request.Request(url, data=data, headers=headers, method='PATCH')
             try:
                 with urllib.request.urlopen(req_retry, timeout=HTTP_TIMEOUT_SECONDS) as res_retry:
                     if res_retry.status in (204, 200):
-                        obs.script_log(obs.LOG_INFO, f"✓ [{PLUGIN_NAME}] ¡Información actualizada tras refrescar el token!")
+                        _queue_obs_log(obs.LOG_INFO, f"✓ [{PLUGIN_NAME}] ¡Información actualizada tras refrescar el token!")
                         return
             except urllib.error.HTTPError as retry_error:
-                obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error en el reintento: {_safe_error(retry_error)}")
+                _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error en el reintento: {retry_error}")
             except urllib.error.URLError as retry_error:
-                obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Fallo de red en el reintento: {_safe_error(retry_error)}")
+                _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Fallo de red en el reintento: {retry_error}")
             except TimeoutError as retry_error:
-                obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Timeout en el reintento: {_safe_error(retry_error)}")
+                _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Timeout en el reintento: {retry_error}")
             except OSError as retry_error:
-                obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error de socket en el reintento: {_safe_error(retry_error)}")
+                _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error de socket en el reintento: {retry_error}")
         elif he.code == 401:
-            obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Token rechazado y no se pudo refrescar.")
-        obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error: {_safe_error(he.reason)}")
+            _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Token rechazado y no se pudo refrescar.")
+        _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error: {he.reason}")
     except urllib.error.URLError as error:
-        obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Fallo de red actualizando la información: {_safe_error(error)}")
+        _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Fallo de red actualizando la información: {error}")
     except TimeoutError as error:
-        obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Timeout actualizando la información: {_safe_error(error)}")
+        _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Timeout actualizando la información: {error}")
     except OSError as error:
-        obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error de socket actualizando la información: {_safe_error(error)}")
+        _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error de socket actualizando la información: {error}")
 
 def on_apply_clicked(properties, property):
     execute_stream_info_update(allow_during_streaming=True)
@@ -863,13 +1469,10 @@ def on_export_settings(props, prop):
     settings_dir = obs.obs_data_get_string(_script_settings, "settings_path") or os.path.join(os.path.expanduser("~"), "Desktop")
     export_path = os.path.join(settings_dir, SETTINGS_FILENAME)
     try:
-        scene_map = obs.obs_data_get_obj(_script_settings, "scene_map")
-        scene_map_json = obs.obs_data_get_json(scene_map) if scene_map else "{}"
-        if scene_map: obs.obs_data_release(scene_map)
         config_data = {
             "enabled": enabled, "block_if_streaming": block_if_streaming, "update_mode": update_mode,
             "delay_seconds": delay_seconds, "global_suffix": global_suffix, "twitch_scopes": twitch_scopes,
-            "broadcaster_id": broadcaster_id, "scene_map": json.loads(scene_map_json)
+            "broadcaster_id": broadcaster_id, "scene_map": _read_scene_map(_script_settings)
         }
         with open(export_path, "w", encoding="utf-8") as f: json.dump(config_data, f, indent=4, ensure_ascii=False)
         obs.script_log(
@@ -880,7 +1483,7 @@ def on_export_settings(props, prop):
     return True
 
 def on_import_settings(props, prop):
-    global _is_importing_settings
+    global _is_importing_settings, _credential_migration_pending, _credential_backend_status
     settings_dir = obs.obs_data_get_string(_script_settings, "settings_path") or os.path.join(os.path.expanduser("~"), "Desktop")
     import_path = os.path.join(settings_dir, SETTINGS_FILENAME)
     if not os.path.exists(import_path):
@@ -888,46 +1491,49 @@ def on_import_settings(props, prop):
         return True
     try:
         with open(import_path, "r", encoding="utf-8") as f: config_data = json.load(f)
+        if not isinstance(config_data, dict):
+            raise ValueError("El archivo de ajustes debe contener un objeto JSON")
         target_settings = _script_settings or obs.obs_data_create()
         obs.obs_data_set_bool(target_settings, "enabled", config_data.get("enabled", True))
         obs.obs_data_set_bool(target_settings, "block_if_streaming", config_data.get("block_if_streaming", False))
         obs.obs_data_set_int(target_settings, "update_mode", config_data.get("update_mode", 1))
         obs.obs_data_set_int(target_settings, "delay_seconds", config_data.get("delay_seconds", 60))
         obs.obs_data_set_string(target_settings, "global_suffix", config_data.get("global_suffix", ". No commentary. Bring your own music."))
-        imported_credentials = {}
-        for key in CREDENTIAL_KEYS:
-            value = config_data.get(key)
-            if isinstance(value, str) and value:
-                imported_credentials[key] = value
-        if imported_credentials:
-            credentials = {
-                key: imported_credentials.get(key, globals()[key])
-                for key in CREDENTIAL_KEYS
-            }
-            try:
-                _save_credentials(credentials)
-                _set_runtime_credentials(credentials)
-                _clear_credentials_from_settings(target_settings)
-            except (OSError, ValueError) as error:
-                for key, value in credentials.items():
-                    obs.obs_data_set_string(target_settings, key, value)
+        imported_credentials = _credentials_from_legacy_config(config_data)
+        credentials_migrated = False
+        if any(imported_credentials.values()):
+            credentials_migrated = _migrate_credentials(
+                target_settings,
+                imported_credentials,
+                preserve_legacy=False,
+            )
+            if credentials_migrated:
                 obs.script_log(
                     obs.LOG_INFO,
-                    f"[{PLUGIN_NAME}] [ERROR] No se pudieron guardar las credenciales importadas: "
-                    f"{_safe_error(error, credentials)}"
+                    f"[{PLUGIN_NAME}] Credenciales importadas y verificadas en {_credential_backend_status}."
                 )
+            else:
+                _credential_backend_status += (
+                    f"; credenciales no copiadas a OBS; conserva el archivo de importación: {import_path}."
+                )
+                _update_credential_status()
                 obs.script_log(
                     obs.LOG_INFO,
-                    f"[{PLUGIN_NAME}] [AVISO] Las credenciales antiguas permanecen en los ajustes de OBS."
+                    f"[{PLUGIN_NAME}] [AVISO] Persistencia de credenciales importadas pendiente; "
+                    f"se conserva el JSON en {import_path}."
                 )
-        else:
-            _clear_credentials_from_settings(target_settings)
         obs.obs_data_set_string(target_settings, "twitch_scopes", config_data.get("twitch_scopes", "channel:manage:broadcast user:read:chat"))
         obs.obs_data_set_string(target_settings, "broadcaster_id", config_data.get("broadcaster_id", ""))
         if "scene_map" in config_data:
-            scene_map = obs.obs_data_create_from_json(json.dumps(config_data["scene_map"]))
-            obs.obs_data_set_obj(target_settings, "scene_map", scene_map)
-            obs.obs_data_release(scene_map)
+            imported_scene_map = config_data["scene_map"]
+            if not isinstance(imported_scene_map, dict):
+                raise ValueError("El mapa de escenas importado no es un objeto JSON")
+            obs.obs_data_set_string(
+                target_settings,
+                "scene_map_json",
+                json.dumps(imported_scene_map, ensure_ascii=False),
+            )
+            obs.obs_data_set_string(target_settings, "scene_map", "")
         scene_name = obs.obs_data_get_string(target_settings, "selected_scene") or get_active_scene_name()
         imported_title, imported_category = get_scene_data_from_obs(target_settings, scene_name)
         obs.obs_data_set_string(target_settings, "selected_scene", scene_name)
@@ -938,6 +1544,10 @@ def on_import_settings(props, prop):
             script_update(target_settings)
         finally:
             _is_importing_settings = False
+        if any(imported_credentials.values()) and not credentials_migrated and not _credential_conflict_detected:
+            _set_runtime_credentials(imported_credentials)
+            _credential_migration_pending = True
+            _update_credential_status()
         if props: obs.obs_properties_apply_settings(props, target_settings)
         if not _script_settings: obs.obs_data_release(target_settings)
         obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] ✓ Ajustes importados correctamente.")
@@ -962,34 +1572,128 @@ def on_event(event):
     if not enabled: return
     if event == obs.OBS_FRONTEND_EVENT_SCENE_CHANGED: handle_scene_changed()
 
+
+def _set_credential_validation_result(status, log_message):
+    global _credential_validation_status
+    _credential_validation_status = status
+    _update_credential_status()
+    obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [Check] {log_message}")
+
+
+def _format_token_expiration(expires_in):
+    if isinstance(expires_in, bool) or not isinstance(expires_in, (int, float)) or expires_in < 0:
+        return "vencimiento no informado"
+    remaining = int(expires_in)
+    days, remaining = divmod(remaining, 86400)
+    hours, remaining = divmod(remaining, 3600)
+    minutes, seconds = divmod(remaining, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} d")
+    if hours or days:
+        parts.append(f"{hours} h")
+    if minutes or hours or days:
+        parts.append(f"{minutes} min")
+    if not parts:
+        parts.append(f"{seconds} s")
+    return "vence en " + " ".join(parts)
+
+
 def check_obs_twitch_integration():
-    if not twitch_oauth_token: return
-    headers = {"Client-ID": twitch_client_id, "Authorization": f"Bearer {twitch_oauth_token.replace('oauth:', '').strip()}", "Content-Type": "application/json"}
-    url = "https://api.twitch.tv/helix/users"
+    if not twitch_oauth_token:
+        _set_credential_validation_result(
+            "No hay access token para comprobar.",
+            "No hay access token configurado.",
+        )
+        return False
+    _credential_validation_status = "Comprobando access token con Twitch..."
+    _update_credential_status()
+    headers = {"Authorization": _oauth_authorization_header(twitch_oauth_token)}
+    url = "https://id.twitch.tv/oauth2/validate"
     try:
         with urllib.request.urlopen(
-            urllib.request.Request(url, headers=headers),
+            urllib.request.Request(url, headers=headers, method="GET"),
             timeout=HTTP_TIMEOUT_SECONDS
         ) as response:
-            obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [Check] ✓ Token VÁLIDO.")
+            validation = json.loads(response.read().decode("utf-8"))
+            if not isinstance(validation, dict):
+                raise ValueError("La respuesta de validación no es un objeto JSON.")
+            validated_client_id = validation.get("client_id")
+            if not isinstance(validated_client_id, str) or not validated_client_id:
+                raise ValueError("La respuesta de validación no incluye un Client ID.")
+            expiration = _format_token_expiration(validation.get("expires_in"))
+            if twitch_client_id and validated_client_id != twitch_client_id.strip():
+                _set_credential_validation_result(
+                    f"Access token válido, pero el Client ID no coincide; {expiration}.",
+                    f"Token VÁLIDO, pero el Client ID configurado no coincide; {expiration}.",
+                )
+                return False
+            _set_credential_validation_result(
+                f"Access token válido según Twitch; {expiration}.",
+                f"✓ Token VÁLIDO; {expiration}.",
+            )
+            return True
     except urllib.error.HTTPError as he:
-        if he.code == 401 and refresh_twitch_token(): return
-        obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] [Check] Error token: {_safe_error(he)}")
+        if he.code == 401:
+            _set_credential_validation_result(
+                "Access token rechazado por Twitch (HTTP 401); prueba a renovarlo.",
+                "✗ Token rechazado por Twitch (HTTP 401); prueba a renovarlo.",
+            )
+        else:
+            _set_credential_validation_result(
+                f"No se pudo comprobar el token: error HTTP {he.code}.",
+                f"✗ Error HTTP {he.code} comprobando el token.",
+            )
+        return False
+    except (ValueError, UnicodeDecodeError) as error:
+        detail = _safe_error(error)
+        _set_credential_validation_result(
+            "Twitch devolvió una respuesta de validación no válida.",
+            f"✗ Respuesta de validación no válida: {detail}",
+        )
+        return False
     except urllib.error.URLError as error:
-        obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] [Check] Fallo de red comprobando el token: {_safe_error(error)}")
+        _set_credential_validation_result(
+            "Falló la comprobación por un error de conexión.",
+            f"✗ Error de conexión comprobando el token: {_safe_error(error)}",
+        )
+        return False
     except TimeoutError as error:
-        obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] [Check] Timeout comprobando el token: {_safe_error(error)}")
+        _set_credential_validation_result(
+            "Falló la comprobación por timeout.",
+            f"✗ Timeout comprobando el token: {_safe_error(error)}",
+        )
+        return False
     except OSError as error:
-        obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] [Check] Error de socket comprobando el token: {_safe_error(error)}")
+        _set_credential_validation_result(
+            "Falló la comprobación por un error de conexión.",
+            f"✗ Error de conexión comprobando el token: {_safe_error(error)}",
+        )
+        return False
+    return False
 
 def script_load(settings):
     global _script_settings
     _script_settings = settings
+    obs.timer_add(_process_main_thread_actions, 100)
     obs.obs_frontend_add_event_callback(on_event)
     obs.script_log(obs.LOG_INFO, f"{PLUGIN_NAME} cargado.")
 
 def script_unload():
+    _http_stop_event.set()
+    with _http_workers_lock:
+        workers = list(_http_workers)
+    shutdown_deadline = time.monotonic() + HTTP_TIMEOUT_SECONDS + 2
+    for worker in workers:
+        worker.join(timeout=max(0, shutdown_deadline - time.monotonic()))
+    _process_main_thread_actions()
     obs.timer_remove(execute_stream_info_update)
     obs.timer_remove(run_proactive_refresh)
+    obs.timer_remove(_process_main_thread_actions)
     obs.obs_frontend_remove_event_callback(on_event)
     obs.script_log(obs.LOG_INFO, f"{PLUGIN_NAME} descargado.")
+    if any(worker.is_alive() for worker in workers):
+        obs.script_log(
+            obs.LOG_WARNING,
+            f"[{PLUGIN_NAME}] Una llamada de red sigue finalizando; no volverá a llamar a OBS.",
+        )

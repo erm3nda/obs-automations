@@ -1,4 +1,4 @@
-# install.ps1
+﻿# install.ps1
 # Copia twitch-stream-info.py y twitch-stream-info.json al directorio de scripts de OBS Studio.
 
 # Evitar elevación si ya se ejecuta como Admin o se invoca desde el maestro
@@ -13,7 +13,7 @@ if (-not $isAdmin -and -not $env:OBS_AUTO_INSTALL_RUNNING) {
 $obsScriptsDir = Join-Path $env:ProgramFiles "obs-studio\data\obs-plugins\frontend-tools\scripts"
 
 if (-not (Test-Path $obsScriptsDir)) {
-    Write-Error "No se encontro el directorio de scripts de OBS:`n  $obsScriptsDir`nAsegurate de que OBS Studio esta instalado."
+    Write-Error "No se encontró el directorio de scripts de OBS:`n  $obsScriptsDir`nAsegúrate de que OBS Studio está instalado."
     exit 1
 }
 

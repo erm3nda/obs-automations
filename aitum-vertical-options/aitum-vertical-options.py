@@ -52,7 +52,9 @@ _SCENE_ALIASES = {
 def script_description():
     return (
         "Gestiona las escenas y archivos de Aitum Vertical. Los auto-inicios de "
-        "grabación y backtrack son opcionales y están desactivados por defecto."
+        "grabación y backtrack son opcionales y están desactivados por defecto.\n\n"
+        "ADVERTENCIA: cerrar OBS con backtrack vertical activo puede provocar un "
+        "crash. Se recomienda no activar las opciones de auto-inicio."
     )
 
 
@@ -117,25 +119,21 @@ def on_import_settings(props, prop):
 def script_properties():
     props = obs.obs_properties_create()
     obs.obs_properties_add_bool(props, "enabled", "Plugin activo")
-    obs.obs_properties_add_path(
-        props, "base_folder", "Carpeta base para archivos verticales",
-        obs.OBS_PATH_DIRECTORY, "", None
-    )
-    obs.obs_properties_add_bool(props, "sync_scene", "Sincronizar escena")
-    obs.obs_properties_add_bool(props, "move_vertical_files", "Mover archivos automáticamente")
-    obs.obs_properties_add_bool(props, "keep_vertical_recording", "Mantener grabación vertical activa")
-    obs.obs_properties_add_bool(props, "auto_start_vertical_recording", "Auto-iniciar grabación vertical")
-    obs.obs_properties_add_bool(props, "auto_start_vertical_backtrack", "Auto-iniciar backtrack vertical")
-    obs.obs_properties_add_text(
-        props, "vertical_warning",
-        "ADVERTENCIA: cerrar OBS con backtrack vertical activo puede provocar un crash. Se recomienda no activar las opciones de auto-inicio.",
-        obs.OBS_TEXT_INFO
-    )
-    obs.obs_properties_add_bool(props, "enable_vertical_cleanup", "Limpiar archivos en negro")
-    obs.obs_properties_add_int(props, "vertical_min_size_mb", "Tamaño mínimo (MB)", 0, 500, 1)
+
+    options = obs.obs_properties_create()
+    obs.obs_properties_add_text(options, "base_folder_label", "Carpeta destino", obs.OBS_TEXT_INFO)
+    obs.obs_properties_add_path(options, "base_folder", "", obs.OBS_PATH_DIRECTORY, "", None)
+    obs.obs_properties_add_bool(options, "sync_scene", "Sincronizar escena")
+    obs.obs_properties_add_bool(options, "move_vertical_files", "Mover archivos automáticamente")
+    obs.obs_properties_add_bool(options, "keep_vertical_recording", "Mantener grabación vertical activa")
+    obs.obs_properties_add_bool(options, "auto_start_vertical_recording", "Auto-iniciar grabación vertical")
+    obs.obs_properties_add_bool(options, "auto_start_vertical_backtrack", "Auto-iniciar backtrack vertical")
+    obs.obs_properties_add_bool(options, "enable_vertical_cleanup", "Limpiar archivos en negro")
+    obs.obs_properties_add_int(options, "vertical_min_size_mb", "Tamaño mínimo (MB)", 0, 500, 1)
     obs.obs_properties_add_int_slider(
-        props, "vertical_cleanup_threshold", "% de negro para eliminar", 50, 100, 1
+        options, "vertical_cleanup_threshold", "% de negro para eliminar", 50, 100, 1
     )
+    obs.obs_properties_add_group(props, "vertical_options", "Opciones", obs.OBS_GROUP_NORMAL, options)
 
     management = obs.obs_properties_create()
     obs.obs_properties_add_path(
@@ -383,6 +381,12 @@ def _update_vertical_recording_controls():
 def _clean_name(name):
     name = re.sub(r"[<>:\"/\\|?*]", " ", name)
     name = re.sub(r"\s+", " ", name).strip()
+    name = re.sub(
+        r"(?:\s+(?:escene|vertical))+\s*$",
+        "",
+        name,
+        flags=re.IGNORECASE
+    ).strip()
     return name or "unnamed"
 
 
@@ -390,7 +394,7 @@ def _update_target_folder(scene_name):
     global _vertical_target_folder, _current_scene_name
     _current_scene_name = scene_name
     _vertical_target_folder = None
-    if base_folder:
+    if base_folder and scene_name.strip():
         _vertical_target_folder = os.path.join(base_folder, _clean_name(scene_name))
         os.makedirs(_vertical_target_folder, exist_ok=True)
 

@@ -1,6 +1,6 @@
-# install.ps1
+﻿# install.ps1
 # Copia record-paths-by-scene.py al directorio de scripts de OBS Studio.
-# Compatible con cualquier usuario y cualquier instalacion estandar de OBS.
+# Compatible con cualquier usuario y cualquier instalación estándar de OBS.
 
 # Verificar si se ejecuta como Administrador, si no, autoelevarse
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -18,13 +18,13 @@ $destination = Join-Path $obsScriptsDir $scriptName
 
 # Verificar que el archivo fuente existe
 if (-not (Test-Path $sourceFile)) {
-    Write-Error "No se encontro el archivo fuente: $sourceFile"
+    Write-Error "No se encontró el archivo fuente: $sourceFile"
     exit 1
 }
 
 # Verificar que el directorio de OBS existe
 if (-not (Test-Path $obsScriptsDir)) {
-    Write-Error "No se encontro el directorio de scripts de OBS:`n  $obsScriptsDir`nAsegurate de que OBS Studio esta instalado."
+    Write-Error "No se encontró el directorio de scripts de OBS:`n  $obsScriptsDir`nAsegúrate de que OBS Studio está instalado."
     exit 1
 }
 

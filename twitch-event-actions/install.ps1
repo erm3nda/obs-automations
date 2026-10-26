@@ -1,4 +1,4 @@
-# install.ps1
+﻿# install.ps1
 # Copia Twitch Event Actions al directorio de scripts de OBS Studio.
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -14,12 +14,12 @@ $obsScriptsDir = Join-Path $env:ProgramFiles "obs-studio\data\obs-plugins\fronte
 $destination = Join-Path $obsScriptsDir $scriptName
 
 if (-not (Test-Path $sourceFile)) {
-    Write-Error "No se encontro el archivo fuente: $sourceFile"
+    Write-Error "No se encontró el archivo fuente: $sourceFile"
     exit 1
 }
 
 if (-not (Test-Path $obsScriptsDir)) {
-    Write-Error "No se encontro el directorio de scripts de OBS:`n  $obsScriptsDir"
+    Write-Error "No se encontró el directorio de scripts de OBS:`n  $obsScriptsDir"
     exit 1
 }
 
