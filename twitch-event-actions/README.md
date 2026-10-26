@@ -15,7 +15,7 @@ Unified OBS plugin to automate actions based on real-time Twitch events.
   - Twitch's retired legacy **Host** event is not available; use **Raid recibido** for current incoming raids.
 
 - **Direct Token Authorization**: Opens the official Twitch OAuth2 URL directly in your browser, with scopes pre-filled from your configuration. Approve and paste the token — no external tools or automation needed.
-- **Credential storage**: The Client ID, OAuth/access token, and refresh token are stored in Windows Credential Manager on Windows. Other systems use a local fallback file and show a warning.
+- **Credential storage**: Windows Credential Manager is the default on Windows. The local plaintext fallback requires explicit permission when the secure store is unavailable, or can be explicitly forced instead.
 - **Settings Management**: Allows full configuration import/export between OBS profiles.
 
 ## Installation
@@ -31,8 +31,9 @@ Unified OBS plugin to automate actions based on real-time Twitch events.
 1. Enable the events you need, then click "🌐 Abrir URL de Autorización Twitch". The URL includes the scopes needed by enabled events. Approve the request, copy the returned token, and paste the access and refresh tokens into their fields.
 2. Use the "🔍 Detectar ID y Canal" button to auto-fill your Broadcaster ID and chat channel.
 3. Click "🔒 Guardar credenciales" to move credentials out of OBS settings. The fields stay blank after saving or loading; the status row shows asterisks for values present, the actual storage backend, and whether Twitch validation has succeeded. Values are removed from OBS settings only after a write-and-read-back verification succeeds.
-   - Windows uses Credential Manager. Existing plaintext fallback files are migrated there on load; the file is removed only after the stored values are read back and match.
-   - On systems without an encrypted credential store, or if Credential Manager fails, saving to `~/.obs-twitch-event-actions-credentials.json` is opt-in: enable "Permitir fallback local SIN CIFRAR si no hay almacén seguro". The UI and log identify the plaintext backend and path. If it is disabled or storage verification fails, the original OBS settings are retained and the UI reports that migration is pending.
+   - Windows uses Credential Manager by default. Existing plaintext fallback files are migrated there on load unless forced fallback is selected; the source file is removed only after the destination values are read back and match.
+   - On systems without an encrypted credential store, or if Credential Manager fails, saving to `~/.obs-twitch-event-actions-credentials.json` is opt-in: enable "Permitir fallback SIN CIFRAR si falla el almacén seguro". This only permits plaintext when the secure store is unavailable.
+   - To use the plaintext file even when Credential Manager is available, enable "Forzar almacenamiento local SIN CIFRAR". This is explicit consent to plaintext storage; the file is verified before Credential Manager is removed. If verification or removal fails, the previous copy is retained and the UI reports the actual backend.
    - If Credential Manager and an old fallback file contain different credentials, migration stops and preserves both. To explicitly resolve this conflict, enter all three current credentials before saving; the script will verify the selected values before removing the old fallback.
    - Leave credential fields blank to keep saved values. Use "🗑 Borrar credenciales guardadas" to remove stored credentials and the fallback file.
 4. Use "🔍 Comprobar Token" to validate the access token directly with Twitch. The result appears in the credential status row and in the OBS script log at INFO level, including when no token is available or Twitch rejects it. "🔄 Forzar Refresco" rotates the refresh token through TwitchTokenGenerator.com; it does not validate the access token itself. "🔍 Detectar ID y Canal" also checks the access token while retrieving broadcaster details.

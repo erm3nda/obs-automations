@@ -49,15 +49,6 @@ _SCENE_ALIASES = {
 }
 
 
-def script_description():
-    return (
-        "Gestiona las escenas y archivos de Aitum Vertical. Los auto-inicios de "
-        "grabación y backtrack son opcionales y están desactivados por defecto.\n\n"
-        "ADVERTENCIA: cerrar OBS con backtrack vertical activo puede provocar un "
-        "crash. Se recomienda no activar las opciones de auto-inicio."
-    )
-
-
 def _settings_directory():
     path = obs.obs_data_get_string(_script_settings, "settings_path") if _script_settings else ""
     return path or os.path.join(os.path.expanduser("~"), "Desktop")
@@ -116,13 +107,23 @@ def on_import_settings(props, prop):
     return True
 
 
+def script_description():
+    return (
+        "<b>Opciones de Aitum Vertical</b><br>"
+        "<b>Sincronizar escena:</b> cambia a la escena vertical equivalente.<br>"
+        "<b>Mover archivos:</b> pasa las grabaciones verticales a la carpeta destino.<br>"
+        "<b>Mantener grabación:</b> evita detenerla al cambiar de escena.<br>"
+        "<b>Auto-iniciar grabación/backtrack:</b> ambas opciones están desactivadas por defecto; el backtrack vertical puede provocar cierres inesperados de OBS.<br>"
+        "<b>Limpiar archivos en negro:</b> elimina grabaciones según el tamaño mínimo y el umbral configurados."
+    )
+
+
 def script_properties():
     props = obs.obs_properties_create()
     obs.obs_properties_add_bool(props, "enabled", "Plugin activo")
 
     options = obs.obs_properties_create()
-    obs.obs_properties_add_text(options, "base_folder_label", "Carpeta destino", obs.OBS_TEXT_INFO)
-    obs.obs_properties_add_path(options, "base_folder", "", obs.OBS_PATH_DIRECTORY, "", None)
+    obs.obs_properties_add_path(options, "base_folder", "Carpeta destino", obs.OBS_PATH_DIRECTORY, "", None)
     obs.obs_properties_add_bool(options, "sync_scene", "Sincronizar escena")
     obs.obs_properties_add_bool(options, "move_vertical_files", "Mover archivos automáticamente")
     obs.obs_properties_add_bool(options, "keep_vertical_recording", "Mantener grabación vertical activa")

@@ -53,17 +53,6 @@ _current_recording_folder = None
 _active_recording_folder  = None
 
 
-# ─── Script metadata ──────────────────────────────────────────────────────────
-
-def script_description():
-    return (
-        "<b>Set-Escene-Path</b><br>"
-        "Cambia el path de grabación y replay buffer según el <b>nombre de la escena</b> activa.<br><br>"
-        "• <b>Mantener grabación:</b> no interrumpe, aplica en la próxima sesión.<br>"
-        "• <b>Auto-start:</b> detiene y reinicia en el nuevo path automáticamente.<br>"
-        "<i>El stream nunca se toca.</i>"
-    )
-
 def on_export_settings(props, prop):
     settings_dir = obs.obs_data_get_string(_script_settings, "settings_path")
     if not settings_dir:
@@ -130,10 +119,21 @@ def on_import_settings(props, prop):
         obs.script_log(obs.LOG_INFO, "[ERROR] Error al importar ajustes: {}".format(e))
     return True
 
+def script_description():
+    return (
+        "<b>Opciones de rutas por escena</b><br>"
+        "<b>Carpeta y formato:</b> la ruta se aplica según el nombre de la escena activa.<br>"
+        "<b>Palabras a ignorar:</b> separa los términos con comas.<br>"
+        "<b>Mantener grabación:</b> aplica la ruta nueva en la próxima sesión sin interrumpir la actual.<br>"
+        "<b>Auto-start de grabación/replay buffer:</b> detiene y reinicia cada función para aplicar la ruta; el stream no se modifica.<br>"
+        "<b>Limpiar archivos:</b> elimina clips negros según el tamaño mínimo y el umbral configurados."
+    )
+
+
 def script_properties():
     props = obs.obs_properties_create()
     root_props = props
-    obs.obs_properties_add_bool(props, "enabled", "Plugin Activo")
+    obs.obs_properties_add_bool(props, "enabled", "Plugin activo")
     
     def on_preview_click(button_props, prop):
         sc = obs.obs_frontend_get_current_scene()
@@ -176,7 +176,7 @@ def script_properties():
             
             preview_str = os.path.join(target, preview_filename + ext)
             
-            p_display = obs.obs_properties_get(root_props, "preview_display")
+            p_display = obs.obs_properties_get(horizontal_props, "preview_display")
             if p_display and _script_settings:
                 obs.obs_data_set_string(
                     _script_settings, "preview_display", preview_str.replace(os.sep, '/')
@@ -196,18 +196,18 @@ def script_properties():
     )
     obs.obs_properties_add_text(
         horizontal_props, "ignored_words",
-        "Palabras a ignorar (separadas por coma)",
+        "Palabras a ignorar",
         obs.OBS_TEXT_DEFAULT
     )
     obs.obs_properties_add_button(
         horizontal_props, "preview_btn", "👁️ Actualizar Vista Previa de Ruta", on_preview_click
     )
     obs.obs_properties_add_text(
-        props, "preview_display", "Vista previa:",
+        horizontal_props, "preview_display", "Vista previa:",
         obs.OBS_TEXT_DEFAULT
     )
     obs.obs_property_set_enabled(
-        obs.obs_properties_get(props, "preview_display"), False
+        obs.obs_properties_get(horizontal_props, "preview_display"), False
     )
     if _script_settings:
         obs.obs_data_set_default_string(_script_settings, "preview_display", "")

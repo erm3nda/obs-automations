@@ -5,6 +5,7 @@ import os
 import ssl
 import time
 import re
+import html
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -115,9 +116,6 @@ EVENT_DEFINITION_BY_KEY = {item[0]: item for item in EVENT_DEFINITIONS}
 # Cola segura para despacho entre hilos
 _chat_queue = []
 _chat_queue_lock = threading.Lock()
-
-def script_description():
-    return "Twitch Event Actions: Automatiza acciones en OBS basadas en eventos de Twitch."
 
 def _log_error(message):
     obs.script_log(obs.LOG_INFO, "[ERROR] {}".format(_redact_secrets(message)))
@@ -293,8 +291,9 @@ def _credentials_from_legacy_config(config_data):
                 break
     return credentials
 
-def _load_credentials():
+def _load_credentials(force_plaintext=False):
     global _credential_storage_backend, _credential_migration_pending
+    _credential_migration_pending = False
     if os.name == "nt":
         stored_credentials = {}
         secure_store_error = None
@@ -306,6 +305,60 @@ def _load_credentials():
                 "No se pudo acceder al Administrador de credenciales de Windows ({}).".format(error)
             )
         fallback_credentials = _read_fallback_credentials()
+        if force_plaintext and any(fallback_credentials.values()):
+            conflicts = [
+                key
+                for key in CREDENTIAL_KEYS
+                if stored_credentials.get(key)
+                and fallback_credentials.get(key)
+                and stored_credentials[key] != fallback_credentials[key]
+            ]
+            if conflicts:
+                _credential_storage_backend = (
+                    "Archivo local SIN CIFRAR (forzado), pero Credential Manager contiene otros valores"
+                )
+                _credential_migration_pending = True
+                _log_error(
+                    "[Twitch-Event-Actions] El fallback forzado y Credential Manager contienen credenciales distintas; "
+                    "se conserva el archivo local sin cifrar."
+                )
+                return fallback_credentials
+            credentials = {
+                key: fallback_credentials.get(key) or stored_credentials.get(key, "")
+                for key in CREDENTIAL_KEYS
+            }
+            try:
+                _write_fallback_credentials(credentials)
+                if _read_fallback_credentials() != credentials:
+                    raise OSError("Plaintext credential file verification failed")
+            except (OSError, ValueError) as error:
+                _credential_storage_backend = (
+                    "Fallback SIN CIFRAR forzado no verificado; Credential Manager conservado"
+                )
+                _credential_migration_pending = True
+                _log_error(
+                    "[Twitch-Event-Actions] No se pudo verificar el fallback forzado; "
+                    "Credential Manager se conserva: {}".format(error)
+                )
+                return credentials
+            if any(stored_credentials.values()):
+                try:
+                    _delete_windows_credentials()
+                except OSError as error:
+                    _credential_storage_backend = (
+                        "Archivo local SIN CIFRAR (forzado); no se pudo borrar Credential Manager"
+                    )
+                    _credential_migration_pending = True
+                    _log_error(
+                        "[Twitch-Event-Actions] No se pudo retirar la copia de Credential Manager tras verificar "
+                        "el fallback forzado: {}".format(error)
+                    )
+                    return credentials
+            _credential_storage_backend = "Archivo local SIN CIFRAR (forzado): {}".format(
+                _credential_file_path()
+            )
+            _credential_migration_pending = False
+            return credentials
         if any(stored_credentials.values()):
             conflicts = [
                 key
@@ -388,6 +441,7 @@ def _save_credentials(
     credentials,
     allow_plaintext_fallback=False,
     allow_conflicting_fallback=False,
+    force_plaintext=False,
 ):
     global _credential_storage_backend
     normalized = _normalize_credentials(credentials)
@@ -398,12 +452,11 @@ def _save_credentials(
             else {}
         )
         has_conflicts = any(
-            normalized.get(key)
-            and fallback_credentials.get(key)
+            fallback_credentials.get(key)
             and normalized[key] != fallback_credentials[key]
             for key in CREDENTIAL_KEYS
         )
-        if has_conflicts and not allow_conflicting_fallback:
+        if has_conflicts and not allow_conflicting_fallback and not force_plaintext:
             _credential_storage_backend = (
                 "Credential Manager y archivo SIN CIFRAR contienen credenciales distintas; "
                 "revisión necesaria"
@@ -412,6 +465,44 @@ def _save_credentials(
                 "Hay valores distintos en Credential Manager y el archivo local; "
                 "introduce explícitamente las credenciales correctas antes de sobrescribir la copia"
             )
+        if force_plaintext:
+            try:
+                existing_credentials = _read_windows_credentials() or {}
+            except (OSError, ValueError, json.JSONDecodeError):
+                existing_credentials = {}
+            secure_conflicts = any(
+                existing_credentials.get(key)
+                and normalized[key] != existing_credentials[key]
+                for key in CREDENTIAL_KEYS
+            )
+            if secure_conflicts and not allow_conflicting_fallback:
+                _credential_storage_backend = (
+                    "Credential Manager y fallback SIN CIFRAR contienen credenciales distintas; "
+                    "revisión necesaria"
+                )
+                raise OSError(
+                    "Credential Manager contiene otros valores; introduce explícitamente las tres credenciales "
+                    "para confirmar el cambio al fallback forzado"
+                )
+            try:
+                _write_fallback_credentials(normalized)
+                if _read_fallback_credentials() != normalized:
+                    raise OSError("Plaintext credential file verification failed")
+                _delete_windows_credentials()
+            except (OSError, ValueError) as error:
+                _credential_storage_backend = (
+                    "Fallback SIN CIFRAR verificado; no se confirmó el cambio desde Credential Manager"
+                    if os.path.exists(_credential_file_path())
+                    else "No se confirmó el guardado local SIN CIFRAR"
+                )
+                raise OSError(
+                    "No se pudo verificar el fallback forzado o retirar la copia de Credential Manager"
+                ) from error
+            _credential_storage_backend = "Archivo local SIN CIFRAR (forzado): {}".format(
+                _credential_file_path()
+            )
+            _log_fallback_warning("El uso forzado del fallback local sin cifrar está habilitado.")
+            return _credential_storage_backend
         existing_credentials = None
         try:
             existing_credentials = _read_windows_credentials()
@@ -450,7 +541,7 @@ def _save_credentials(
             _credential_storage_backend = "Administrador de credenciales de Windows (verificado)"
             _remove_fallback_credentials(strict=True)
             return _credential_storage_backend
-    elif not allow_plaintext_fallback:
+    elif not allow_plaintext_fallback and not force_plaintext:
         _credential_storage_backend = (
             "Este sistema no ofrece almacén cifrado; fallback sin cifrar no autorizado"
         )
@@ -477,6 +568,9 @@ def _clear_credentials():
 
 def _plaintext_fallback_allowed(settings):
     return bool(settings and obs.obs_data_get_bool(settings, "allow_plaintext_fallback"))
+
+def _plaintext_fallback_forced(settings):
+    return bool(settings and obs.obs_data_get_bool(settings, "force_plaintext_storage"))
 
 def _credentials_from_settings(settings):
     return {key: obs.obs_data_get_string(settings, key) for key in CREDENTIAL_KEYS}
@@ -506,17 +600,17 @@ def _credential_status_text():
         ("Refresh token", refresh_token),
     )
     masked_fields = [
-        "{}: {}".format(label, "********" if value else "no guardado")
+        "<b>{}:</b> {}".format(label, "********" if value else "—")
         for label, value in status_fields
     ]
     details = [
-        " | ".join(masked_fields),
-        "Almacén: {}".format(_credential_storage_backend),
-        _credential_validation_status,
+        "<b>Credenciales:</b> " + " · ".join(masked_fields),
+        "• Almacén: {}".format(html.escape(_credential_storage_backend)),
+        "• Validación: {}".format(html.escape(_credential_validation_status)),
     ]
     if _credential_migration_pending:
-        details.append("Quedan credenciales en los ajustes de OBS; migración pendiente.")
-    return " | ".join(details)
+        details.append("• Migración: pendiente")
+    return "<br>".join(details)
 
 def _update_credential_status():
     if _credential_status_property is not None:
@@ -546,6 +640,7 @@ def _persist_runtime_credentials():
         backend = _save_credentials(
             credentials,
             allow_plaintext_fallback=_plaintext_fallback_allowed(_script_settings),
+            force_plaintext=_plaintext_fallback_forced(_script_settings),
         )
         if _script_settings:
             _clear_credentials_from_settings(_script_settings)
@@ -575,6 +670,7 @@ def on_save_credentials_clicked(properties, prop):
             credentials,
             allow_plaintext_fallback=_plaintext_fallback_allowed(_script_settings),
             allow_conflicting_fallback=all(settings_credentials.values()),
+            force_plaintext=_plaintext_fallback_forced(_script_settings),
         )
     except (OSError, ValueError) as error:
         _log_error("[Twitch-Event-Actions] No se pudieron guardar las credenciales: {}".format(error))
@@ -807,7 +903,9 @@ def on_import_settings(props, prop):
         imported_credentials = _credentials_from_legacy_config(config_data)
         settings_credentials = _credentials_from_settings(target_settings)
         if any(imported_credentials.values()) or any(settings_credentials.values()):
-            stored_credentials = _load_credentials()
+            stored_credentials = _load_credentials(
+                force_plaintext=_plaintext_fallback_forced(target_settings)
+            )
             credentials = {
                 key: (
                     imported_credentials.get(key)
@@ -823,6 +921,7 @@ def on_import_settings(props, prop):
                     credentials,
                     allow_plaintext_fallback=_plaintext_fallback_allowed(target_settings),
                     allow_conflicting_fallback=all(imported_credentials.get(key) for key in CREDENTIAL_KEYS),
+                    force_plaintext=_plaintext_fallback_forced(target_settings),
                 )
                 _credential_storage_backend = backend
                 _credential_migration_pending = False
@@ -874,14 +973,34 @@ def on_import_settings(props, prop):
         _log_error(f"[Twitch-Event-Actions] Error al importar ajustes: {e}")
     return True
 
+def script_description():
+    return (
+        "<b>Uso de Twitch Event Actions</b><br>"
+        "<b>Evento:</b> elige qué evento de Twitch activa la acción.<br>"
+        "<b>Acción y destino:</b> selecciona qué mostrar o qué fuente/escena controlar en OBS.<br>"
+        "<b>Texto:</b> usa las variables disponibles para incluir datos del evento.<br>"
+        "<b>Credenciales:</b> introduce las nuevas y pulsa Guardar; las guardadas se indican con asteriscos y los campos vacíos las conservan.<br>"
+        "<b>Permitir fallback:</b> autoriza el archivo local sin cifrar si falla el almacén seguro. <b>Forzar almacenamiento:</b> guarda siempre allí. En Windows el acceso depende de los permisos de tu perfil.<br>"
+        "<b>Conflicto de credenciales:</b> se conservan ambas copias; resuélvelo guardando los cuatro campos.<br>"
+        "<b>Renovación:</b> sin Client Secret, el refresh token se envía a TwitchTokenGenerator.com."
+    )
+
+
 def script_properties():
     global _event_ui_properties, _credential_status_property
     props = obs.obs_properties_create()
-    obs.obs_properties_add_bool(props, "enabled", "Plugin Activo")
+    obs.obs_properties_add_bool(props, "enabled", "Plugin activo")
     options_props = obs.obs_properties_create()
-    
+
     # Auth Group
     auth_props = obs.obs_properties_create()
+    obs.obs_properties_add_text(
+        auth_props,
+        "credential_status",
+        _credential_status_text(),
+        obs.OBS_TEXT_INFO,
+    )
+    _credential_status_property = obs.obs_properties_get(auth_props, "credential_status")
     obs.obs_properties_add_button(auth_props, "generate_token", "🌐 Abrir URL de Autorización Twitch", on_generate_token)
     obs.obs_properties_add_button(auth_props, "refresh_token_btn", "🔍 Comprobar Token", on_check_token)
     obs.obs_properties_add_button(auth_props, "force_refresh_button", "🔄 Forzar Refresco de Token", on_refresh_token)
@@ -893,29 +1012,15 @@ def script_properties():
     obs.obs_properties_add_text(auth_props, "client_id", "Twitch Client ID", obs.OBS_TEXT_PASSWORD)
     obs.obs_properties_add_text(auth_props, "oauth_token", "Twitch OAuth Token", obs.OBS_TEXT_PASSWORD)
     obs.obs_properties_add_text(auth_props, "refresh_token", "Twitch Refresh Token", obs.OBS_TEXT_PASSWORD)
-    obs.obs_properties_add_text(
-        auth_props,
-        "credential_status",
-        _credential_status_text(),
-        obs.OBS_TEXT_INFO,
-    )
-    _credential_status_property = obs.obs_properties_get(auth_props, "credential_status")
-    obs.obs_properties_add_text(
-        auth_props,
-        "credentials_help",
-        "Introduce credenciales nuevas y pulsa Guardar. Las guardadas se indican con asteriscos debajo; deja los campos vacíos para conservarlas. El refresco actual envía el refresh token a TwitchTokenGenerator.com.",
-        obs.OBS_TEXT_INFO,
-    )
     obs.obs_properties_add_bool(
         auth_props,
         "allow_plaintext_fallback",
-        "Permitir fallback local SIN CIFRAR si no hay almacén seguro",
+        "Permitir fallback SIN CIFRAR si falla el almacén seguro",
     )
-    obs.obs_properties_add_text(
+    obs.obs_properties_add_bool(
         auth_props,
-        "plaintext_fallback_help",
-        "Desactivado por defecto. Si lo activas, las credenciales se guardarán en un archivo JSON en texto plano con aviso visible.",
-        obs.OBS_TEXT_INFO,
+        "force_plaintext_storage",
+        "Forzar almacenamiento local SIN CIFRAR",
     )
     obs.obs_properties_add_button(auth_props, "save_credentials_button", "🔒 Guardar credenciales", on_save_credentials_clicked)
     obs.obs_properties_add_button(auth_props, "clear_credentials_button", "🗑 Borrar credenciales guardadas", on_clear_credentials_clicked)
@@ -985,6 +1090,7 @@ def script_properties():
 def script_defaults(settings):
     obs.obs_data_set_default_bool(settings, "enabled", True)
     obs.obs_data_set_default_bool(settings, "allow_plaintext_fallback", False)
+    obs.obs_data_set_default_bool(settings, "force_plaintext_storage", False)
     obs.obs_data_set_default_string(settings, "client_id", "")
     obs.obs_data_set_default_string(settings, "oauth_token", "")
     obs.obs_data_set_default_string(settings, "refresh_token", "")
@@ -1017,18 +1123,25 @@ def script_update(settings):
     enabled = obs.obs_data_get_bool(settings, "enabled")
     settings_credentials = _credentials_from_settings(settings)
     if not _credentials_loaded:
-        stored_credentials = _load_credentials()
+        force_plaintext = _plaintext_fallback_forced(settings)
+        stored_credentials = _load_credentials(force_plaintext=force_plaintext)
         credentials = {
             key: stored_credentials.get(key) or settings_credentials.get(key, "")
             for key in CREDENTIAL_KEYS
         }
         _set_runtime_credentials(credentials)
-        if any(settings_credentials.values()):
+        should_migrate_to_plaintext = (
+            force_plaintext
+            and any(stored_credentials.values())
+            and not _credential_migration_pending
+        )
+        if any(settings_credentials.values()) or should_migrate_to_plaintext:
             _credential_migration_pending = True
             try:
                 backend = _save_credentials(
                     credentials,
                     allow_plaintext_fallback=_plaintext_fallback_allowed(settings),
+                    force_plaintext=force_plaintext,
                 )
                 _clear_credentials_from_settings(settings)
                 _credential_storage_backend = backend
@@ -1302,8 +1415,7 @@ def _render_and_schedule_prune(source_name, duration_seconds):
         if chunks:
             all_messages_blocks.append("\n".join(chunks))
             
-    # Unir los bloques de mensajes con una línea en blanco de separación
-    combined_text = "\n\n".join(all_messages_blocks)
+    combined_text = "\n".join(all_messages_blocks)
     _update_source_text(source_name, combined_text)
     
     if source_name in _active_hide_timers:
