@@ -1327,18 +1327,43 @@ def script_properties():
     def on_add_icon(props, prop):
         # En el callback, 'props' es la instancia de obs_properties_t,
         # pero para obtener/setear datos necesitamos el objeto settings actual.
+        if not _script_settings:
+            obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] No hay ajustes disponibles para anadir el icono.")
+            return True
+
         title = obs.obs_data_get_string(_script_settings, "current_scene_title")
-        icon = obs.obs_data_get_string(_script_settings, "icon_selector")
-        if icon:
-            new_title = f"{title}{icon}"
-            obs.obs_data_set_string(_script_settings, "current_scene_title", new_title)
-            # Refrescar la interfaz para que el campo de texto se actualice
-            obs.obs_properties_apply_settings(props, _script_settings)
+        icon = obs.obs_data_get_string(_script_settings, "icon_selector") or ICONS[0]
+        scene_name = (
+            obs.obs_data_get_string(_script_settings, "selected_scene")
+            or get_active_scene_name()
+        )
+        if not scene_name:
+            obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] No hay una escena seleccionada para guardar el icono.")
+            return True
+
+        new_title = f"{title}{icon}"
+        obs.obs_data_set_string(_script_settings, "current_scene_title", new_title)
+        try:
+            title_to_save = obs.obs_data_get_string(_script_settings, "current_scene_title")
+            category_to_save = obs.obs_data_get_string(_script_settings, "current_scene_category")
+            save_scene_data_to_obs(
+                _script_settings,
+                scene_name,
+                title_to_save,
+                category_to_save,
+            )
+        except (RecursionError, SceneMapError) as error:
+            _log_scene_map_error("No se pudo guardar el icono en el mapa; se mantiene en el campo actual", error)
+
+        obs.obs_properties_apply_settings(_scene_ui_properties or props, _script_settings)
+        obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] Icono anadido al titulo de '{scene_name}'.")
         return True
 
     p_icon_list = obs.obs_properties_add_list(scene_props, "icon_selector", "Selector de iconos", obs.OBS_COMBO_TYPE_LIST, obs.OBS_COMBO_FORMAT_STRING)
     for ic in ICONS:
         obs.obs_property_list_add_string(p_icon_list, ic, ic)
+    if _script_settings and not obs.obs_data_get_string(_script_settings, "icon_selector"):
+        obs.obs_data_set_string(_script_settings, "icon_selector", ICONS[0])
     obs.obs_properties_add_button(scene_props, "add_icon_btn", "➕ Añadir icono al título", on_add_icon)
 
     p_cat = obs.obs_properties_add_list(
@@ -1600,7 +1625,12 @@ def get_game_id_by_name(game_name, headers):
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
             res_data = json.loads(response.read().decode('utf-8'))
             games = res_data.get("data", [])
-            if games: return games[0].get("id")
+            if games and games[0].get("id"):
+                return games[0]["id"]
+            _queue_obs_log(
+                obs.LOG_INFO,
+                f"[{PLUGIN_NAME}] [AVISO] Twitch no encontró la categoría exacta '{game_name}'; se actualizará solo el título.",
+            )
     except Exception as e:
         _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error buscando categoría: {e}")
     return None
@@ -1614,7 +1644,9 @@ def get_broadcaster_id_automatically(headers):
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
             res_data = json.loads(response.read().decode('utf-8'))
             users = res_data.get("data", [])
-            if users: return users[0].get("id")
+            if users and users[0].get("id"):
+                return users[0]["id"]
+            _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Twitch no devolvió un ID de canal para este token.")
     except Exception as e:
         _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error obteniendo Broadcaster ID: {e}")
     return None
@@ -1676,11 +1708,25 @@ def update_stream_info_helix(title, category):
     global twitch_oauth_token, twitch_refresh_token
     if _http_stop_event.is_set():
         return
-    if not twitch_client_id or not twitch_oauth_token: return
+    if not twitch_client_id or not twitch_oauth_token:
+        _queue_obs_log(
+            obs.LOG_INFO,
+            f"[{PLUGIN_NAME}] [ERROR] No se actualizó el stream: falta Client ID o Access Token. Revisa las credenciales guardadas.",
+        )
+        return
 
-    headers = {"Client-ID": twitch_client_id, "Authorization": f"Bearer {twitch_oauth_token.replace('oauth:', '').strip()}", "Content-Type": "application/json"}
+    access_token = twitch_oauth_token.strip()
+    if access_token.lower().startswith("oauth:"):
+        access_token = access_token[6:]
+    headers = {"Client-ID": twitch_client_id.strip(), "Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
     current_broadcaster_id = broadcaster_id or get_broadcaster_id_automatically(headers)
-    if not current_broadcaster_id or _http_stop_event.is_set(): return
+    if not current_broadcaster_id:
+        _queue_obs_log(
+            obs.LOG_INFO,
+            f"[{PLUGIN_NAME}] [ERROR] No se actualizó el stream: no se pudo obtener Broadcaster ID. Comprueba el token y que el Client ID coincida.",
+        )
+        return
+    if _http_stop_event.is_set(): return
 
     game_id = get_game_id_by_name(category, headers) if category else None
     if _http_stop_event.is_set():
@@ -1702,6 +1748,10 @@ def update_stream_info_helix(title, category):
             if response.status in (204, 200):
                 _queue_obs_log(obs.LOG_INFO, f"✓ [{PLUGIN_NAME}] ¡Información actualizada!")
                 return
+            _queue_obs_log(
+                obs.LOG_INFO,
+                f"[{PLUGIN_NAME}] [ERROR] Twitch respondió HTTP {response.status} al actualizar la información.",
+            )
     except urllib.error.HTTPError as he:
         if he.code == 401 and not _http_stop_event.is_set() and refresh_twitch_token():
             if _http_stop_event.is_set():
@@ -1714,16 +1764,22 @@ def update_stream_info_helix(title, category):
                         _queue_obs_log(obs.LOG_INFO, f"✓ [{PLUGIN_NAME}] ¡Información actualizada tras refrescar el token!")
                         return
             except urllib.error.HTTPError as retry_error:
-                _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error en el reintento: {retry_error}")
+                detail = _safe_error(retry_error.read().decode("utf-8", errors="replace"))
+                _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Reintento HTTP {retry_error.code}: {detail or retry_error.reason}")
             except urllib.error.URLError as retry_error:
                 _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Fallo de red en el reintento: {retry_error}")
             except TimeoutError as retry_error:
                 _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Timeout en el reintento: {retry_error}")
             except OSError as retry_error:
                 _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error de socket en el reintento: {retry_error}")
-        elif he.code == 401:
-            _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Token rechazado y no se pudo refrescar.")
-        _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error: {he.reason}")
+        else:
+            detail = _safe_error(he.read().decode("utf-8", errors="replace"))
+            _queue_obs_log(
+                obs.LOG_INFO,
+                f"[{PLUGIN_NAME}] [ERROR] Twitch respondió HTTP {he.code}: {detail or he.reason}",
+            )
+            if he.code == 401 and not _http_stop_event.is_set():
+                _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Twitch rechazó la autorización; revisa el scope channel:manage:broadcast y la cuenta del token.")
     except urllib.error.URLError as error:
         _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Fallo de red actualizando la información: {error}")
     except TimeoutError as error:
@@ -1732,7 +1788,34 @@ def update_stream_info_helix(title, category):
         _queue_obs_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] Error de socket actualizando la información: {error}")
 
 def on_apply_clicked(properties, property):
-    execute_stream_info_update(allow_during_streaming=True)
+    if not enabled:
+        obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] AplicaciÃ³n manual cancelada: activa el plugin primero.")
+        return True
+
+    scene_name = (
+        obs.obs_data_get_string(_script_settings, "selected_scene")
+        if _script_settings else ""
+    ) or get_active_scene_name()
+    if not scene_name:
+        obs.script_log(obs.LOG_INFO, f"[{PLUGIN_NAME}] [ERROR] No hay una escena seleccionada para aplicar.")
+        return True
+
+    # Use the values shown in the editor. The active scene's saved map can be
+    # stale (or unreadable), and manual Apply must not silently replace edits.
+    title = obs.obs_data_get_string(_script_settings, "current_scene_title") if _script_settings else ""
+    category = obs.obs_data_get_string(_script_settings, "current_scene_category") if _script_settings else ""
+    try:
+        save_scene_data_to_obs(_script_settings, scene_name, title, category)
+    except (RecursionError, SceneMapError) as error:
+        _log_scene_map_error("No se pudieron guardar los campos antes de aplicar; se enviarán los valores visibles", error)
+
+    final_title = f"{title if title else clean_scene_name(scene_name)}{global_suffix}"
+    final_category = category if category else clean_scene_name(scene_name)
+    obs.script_log(
+        obs.LOG_INFO,
+        f"[{PLUGIN_NAME}] AplicaciÃ³n manual para escena '{scene_name}' -> TÃ­tulo: '{final_title}' | CategorÃ­a: '{final_category}'",
+    )
+    _start_stream_info_worker(final_title, final_category)
     return True
 
 def on_export_settings(props, prop):
@@ -1900,10 +1983,32 @@ def check_obs_twitch_integration():
             if not isinstance(validated_client_id, str) or not validated_client_id:
                 raise ValueError("La respuesta de validación no incluye un Client ID.")
             expiration = _format_token_expiration(validation.get("expires_in"))
+            if not twitch_client_id or not twitch_client_id.strip():
+                _set_credential_validation_result(
+                    "Token válido, pero falta configurar el Client ID.",
+                    "Token VÁLIDO, pero falta configurar el Client ID.",
+                )
+                return False
             if twitch_client_id and validated_client_id != twitch_client_id.strip():
                 _set_credential_validation_result(
                     f"Access token válido, pero el Client ID no coincide; {expiration}.",
                     f"Token VÁLIDO, pero el Client ID configurado no coincide; {expiration}.",
+                )
+                return False
+            scopes = validation.get("scopes", [])
+            if not isinstance(scopes, list):
+                raise ValueError("Twitch no devolvió la lista de permisos del token.")
+            if "channel:manage:broadcast" not in scopes:
+                _set_credential_validation_result(
+                    "Token válido, pero le falta el permiso channel:manage:broadcast.",
+                    "Token VÁLIDO, pero falta el permiso requerido channel:manage:broadcast.",
+                )
+                return False
+            token_user_id = validation.get("user_id")
+            if broadcaster_id and token_user_id and broadcaster_id.strip() != token_user_id:
+                _set_credential_validation_result(
+                    "Token válido, pero Broadcaster ID no coincide con la cuenta del token.",
+                    "Token VÁLIDO, pero Broadcaster ID no coincide con user_id del token.",
                 )
                 return False
             _set_credential_validation_result(
